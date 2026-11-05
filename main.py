@@ -6,14 +6,15 @@ import logging
 import tempfile
 import secrets
 import hmac
+import re
 
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 from google import genai
@@ -32,6 +33,9 @@ PORT = int(os.environ.get("PORT", "10000"))
 if not RENDER_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL is missing")
 
+if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
+    raise RuntimeError("Invalid WEBHOOK_SECRET format")
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL = "gemini-2.5-flash"
 
@@ -43,7 +47,7 @@ telegram_app = (
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot!\n\n"
         "Please send a text-based PDF file.\n"
         "I will create MCQ Quiz from your PDF."
@@ -148,7 +152,6 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for q in questions:
             options = q.get("options", {})
             answer = str(q.get("answer", "")).upper()
-
             keys = ["A", "B", "C", "D"]
 
             if (
@@ -202,6 +205,7 @@ async def webhook_handler(request):
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.process_update(update)
         return web.Response(text="OK")
+
     except Exception:
         logger.exception("Webhook update failed")
         return web.Response(status=500, text="Error")
@@ -221,19 +225,21 @@ async def on_startup(app):
         url=webhook_url,
         secret_token=WEBHOOK_SECRET,
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
+        drop_pending_updates=False,
     )
 
-    logger.info("Telegram webhook configured")
+    logger.info("Telegram webhook configured successfully")
 
 
 async def on_cleanup(app):
-    await telegram_app.bot.delete_webhook()
+    # IMPORTANT:
+    # Do not delete webhook during Render restart or shutdown.
     await telegram_app.stop()
     await telegram_app.shutdown()
 
 
 web_app = web.Application()
+
 web_app.router.add_get("/", health)
 web_app.router.add_get("/health", health)
 web_app.router.add_post("/webhook", webhook_handler)
