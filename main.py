@@ -6,6 +6,7 @@ import logging
 import tempfile
 import hmac
 import re
+import time
 
 from aiohttp import web
 from telegram import Update
@@ -18,6 +19,7 @@ from telegram.ext import (
 )
 from google import genai
 from pypdf import PdfReader
+
 
 # ================ CONFIGURATION ================
 
@@ -42,6 +44,7 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
     raise RuntimeError("Invalid WEBHOOK_SECRET format")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
 MODEL = "gemini-3.8-flash"
 
 telegram_app = (
@@ -118,29 +121,81 @@ PDF TEXT:
 {pdf_text[:60000]}
 """
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "temperature": 0.2,
-        },
-    )
+    # Retry delays: 5, 10 and 20 seconds
+    retry_delays = [5, 10, 20]
 
-    if not response.text:
-        raise ValueError("Gemini returned empty response")
+    for attempt in range(len(retry_delays) + 1):
 
-    data = json.loads(response.text)
+        try:
 
-    if not isinstance(data, dict):
-        raise ValueError("Invalid JSON response")
+            logger.info(
+                "Gemini request attempt %s",
+                attempt + 1
+            )
 
-    questions = data.get("questions", [])
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.2,
+                },
+            )
 
-    if not isinstance(questions, list):
-        raise ValueError("Invalid questions list")
+            if not response.text:
+                raise ValueError("Gemini returned empty response")
 
-    return questions
+            data = json.loads(response.text)
+
+            if not isinstance(data, dict):
+                raise ValueError("Invalid JSON response")
+
+            questions = data.get("questions", [])
+
+            if not isinstance(questions, list):
+                raise ValueError("Invalid questions list")
+
+            return questions[:30]
+
+        except Exception as exc:
+
+            error_text = str(exc).upper()
+
+            temporary_errors = (
+                "503",
+                "429",
+                "500",
+                "502",
+                "504",
+                "UNAVAILABLE",
+                "RESOURCE_EXHAUSTED",
+                "INTERNAL",
+                "DEADLINE_EXCEEDED",
+            )
+
+            should_retry = any(
+                error in error_text
+                for error in temporary_errors
+            )
+
+            if should_retry and attempt < len(retry_delays):
+
+                delay = retry_delays[attempt]
+
+                logger.warning(
+                    "Temporary Gemini error. "
+                    "Retrying in %s seconds. Error: %s",
+                    delay,
+                    exc,
+                )
+
+                time.sleep(delay)
+                continue
+
+            logger.exception("Gemini MCQ generation failed")
+            raise
+
+    raise RuntimeError("Gemini retry attempts exhausted")
 
 
 # ================ PDF HANDLER ================
@@ -150,21 +205,24 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     document = message.document
 
-    if not document or not document.file_name or not document.file_name.lower().endswith(".pdf"):
+    if (
+        not document
+        or not document.file_name
+        or not document.file_name.lower().endswith(".pdf")
+    ):
 
         await message.reply_text("Please send a PDF file.")
-
         return
 
     if document.file_size and document.file_size > 20 * 1024 * 1024:
 
         await message.reply_text("PDF must be smaller than 20 MB.")
-
         return
 
     await message.reply_text(
         "📥 PDF received!\n"
-        "⏳ Reading PDF and creating MCQs. Please wait..."
+        "⏳ Reading PDF and creating MCQs.\n"
+        "Please wait..."
     )
 
     temp_path = None
@@ -184,6 +242,9 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reader = PdfReader(temp_path)
 
+        if reader.is_encrypted:
+            raise ValueError("Encrypted PDF is not supported")
+
         pdf_text = "\n".join(
             page.extract_text() or ""
             for page in reader.pages
@@ -195,8 +256,12 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ PDF text could not be read.\n"
                 "Please send a text-based PDF, not a scanned PDF."
             )
-
             return
+
+        await message.reply_text(
+            "🤖 PDF text extracted successfully.\n"
+            "Creating MCQs with Gemini AI..."
+        )
 
         questions = await asyncio.to_thread(
             generate_questions,
@@ -208,7 +273,6 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 "No MCQs could be generated from this PDF."
             )
-
             return
 
         sent = 0
@@ -244,39 +308,70 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 q.get("rationale", "")
             ).strip()[:200]
 
-            await context.bot.send_poll(
-                chat_id=message.chat_id,
-                question=question,
-                options=[options[k].strip() for k in keys],
-                type="quiz",
-                correct_option_id=keys.index(answer),
-                explanation=explanation or None,
-                is_anonymous=False,
-            )
+            try:
 
-            sent += 1
+                await context.bot.send_poll(
+                    chat_id=message.chat_id,
+                    question=question,
+                    options=[options[k].strip() for k in keys],
+                    type="quiz",
+                    correct_option_id=keys.index(answer),
+                    explanation=explanation or None,
+                    is_anonymous=False,
+                )
 
-            await asyncio.sleep(1)
+                sent += 1
+
+                await asyncio.sleep(1)
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to send an individual quiz question"
+                )
 
         await message.reply_text(
-            "🎉 Quiz completed!\n\n"
+            "🎉 Quiz processing completed!\n\n"
             f"Total Questions Sent: {sent}\n\n"
             "Best of luck for Bihar CHO preparation! 📚"
         )
 
-    except Exception:
+    except Exception as exc:
 
         logger.exception("PDF processing failed")
 
-        await message.reply_text(
-            "❌ PDF processing failed.\n"
-            "Please check your PDF and API settings."
-        )
+        error_text = str(exc).upper()
+
+        if any(
+            code in error_text
+            for code in ("503", "429", "500", "502", "504",
+                         "UNAVAILABLE", "RESOURCE_EXHAUSTED")
+        ):
+
+            user_message = (
+                "⚠️ Gemini AI is temporarily busy.\n\n"
+                "Please try sending your PDF again after a few minutes."
+            )
+
+        elif "API KEY" in error_text or "API_KEY" in error_text:
+
+            user_message = (
+                "❌ Gemini API Key problem.\n"
+                "Please check GEMINI_API_KEY in Render Environment."
+            )
+
+        else:
+
+            user_message = (
+                "❌ PDF processing failed.\n\n"
+                "Please check the PDF and try again."
+            )
+
+        await message.reply_text(user_message)
 
     finally:
 
         if temp_path and os.path.exists(temp_path):
-
             os.remove(temp_path)
 
 
@@ -373,8 +468,6 @@ async def on_startup(app):
 # ================ CLEANUP ================
 
 async def on_cleanup(app):
-
-    # Never delete webhook during Render restart.
 
     await telegram_app.stop()
 
