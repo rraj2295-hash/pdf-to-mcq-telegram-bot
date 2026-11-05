@@ -4,7 +4,10 @@ import json
 import asyncio
 import logging
 import tempfile
+import secrets
+import hmac
 
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,16 +24,29 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
+PORT = int(os.environ.get("PORT", "10000"))
+
+if not RENDER_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL is missing")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL = "gemini-2.5-flash"
 
-MODEL = "gemini-flash-latest"
+telegram_app = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .build()
+)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot!\n\n"
-        "Apni PDF file bhejiye. Main usse MCQ Quiz banaunga."
+        "Please send a text-based PDF file.\n"
+        "I will create MCQ Quiz from your PDF."
     )
 
 
@@ -38,18 +54,19 @@ def generate_questions(pdf_text):
     prompt = f"""
 You are an expert nursing examination question creator.
 
-Read the following PDF text and create 30 MCQs.
+Create up to 30 MCQs from the supplied PDF.
 
 Rules:
-1. Questions must be based only on the supplied PDF.
-2. Each question must have exactly 4 options.
-3. Give one correct answer.
+1. Use only information in the PDF.
+2. Each question must have exactly four options.
+3. Give exactly one correct answer.
 4. Do not invent facts.
-5. Include explanation only if the PDF explicitly provides it.
-6. If no explanation is given, use an empty string.
+5. Include rationale only if explicitly explained in PDF.
+6. Otherwise rationale must be an empty string.
 7. Avoid duplicate questions.
+8. Return fewer questions if the PDF has insufficient content.
 
-Return ONLY valid JSON in this format:
+Return only valid JSON in this format:
 
 {{
   "questions": [
@@ -77,8 +94,8 @@ PDF TEXT:
         contents=prompt,
         config={
             "response_mime_type": "application/json",
-            "temperature": 0.2
-        }
+            "temperature": 0.2,
+        },
     )
 
     data = json.loads(response.text)
@@ -86,38 +103,45 @@ PDF TEXT:
 
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = update.effective_message
+    document = message.document
 
-    if not message.document.file_name.lower().endswith(".pdf"):
+    if not document.file_name or not document.file_name.lower().endswith(".pdf"):
         await message.reply_text("Please send a PDF file.")
         return
 
-    await message.reply_text("PDF received! Processing... Please wait.")
+    if document.file_size and document.file_size > 20 * 1024 * 1024:
+        await message.reply_text("PDF must be smaller than 20 MB.")
+        return
+
+    await message.reply_text("PDF received! Reading and creating MCQs...")
+
+    temp_path = None
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf") as temp:
-            pdf_file = await context.bot.get_file(message.document.file_id)
-            await pdf_file.download_to_drive(temp.name)
+        with tempfile.NamedTemporaryFile(
+            suffix=".pdf", delete=False
+        ) as temp:
+            temp_path = temp.name
 
-            reader = PdfReader(temp.name)
-            pdf_text = "\n".join(
-                page.extract_text() or "" for page in reader.pages
-            )
+        pdf_file = await context.bot.get_file(document.file_id)
+        await pdf_file.download_to_drive(temp_path)
+
+        reader = PdfReader(temp_path)
+        pdf_text = "\n".join(
+            page.extract_text() or "" for page in reader.pages
+        )
 
         if len(pdf_text.strip()) < 100:
             await message.reply_text(
-                "PDF ka text read nahi ho raha. "
-                "Please send a text-based PDF, not a scanned image PDF."
+                "PDF text could not be read. "
+                "Please send a text-based PDF, not a scanned PDF."
             )
             return
 
         questions = await asyncio.to_thread(
             generate_questions, pdf_text
         )
-
-        if not questions:
-            await message.reply_text("No MCQs generated. Try another PDF.")
-            return
 
         sent = 0
 
@@ -129,12 +153,13 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if (
                 not q.get("question")
+                or not isinstance(options, dict)
                 or any(not options.get(k) for k in keys)
                 or answer not in keys
             ):
                 continue
 
-            explanation = str(q.get("rationale", ""))[:180]
+            explanation = str(q.get("rationale", ""))[:200]
 
             await context.bot.send_poll(
                 chat_id=message.chat_id,
@@ -143,34 +168,83 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 type="quiz",
                 correct_option_id=keys.index(answer),
                 explanation=explanation or None,
-                is_anonymous=False
+                is_anonymous=False,
             )
 
             sent += 1
             await asyncio.sleep(1)
 
         await message.reply_text(
-            f"Quiz completed!\nTotal questions sent: {sent}"
+            f"Quiz completed!\nQuestions sent: {sent}"
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception("PDF processing failed")
         await message.reply_text(
-            f"Error processing PDF: {str(e)[:300]}"
+            "PDF processing failed. Please try again or check the PDF."
         )
 
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(
-        MessageHandler(filters.Document.PDF, handle_pdf)
+async def webhook_handler(request):
+    supplied_secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token", ""
     )
 
-    print("Bihar CHO Quiz Bot is running...")
-    app.run_polling()
+    if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
+        raise web.HTTPForbidden()
+
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return web.Response(text="OK")
+    except Exception:
+        logger.exception("Webhook update failed")
+        return web.Response(status=500, text="Error")
+
+
+async def health(request):
+    return web.Response(text="Bihar CHO Quiz Bot is running!")
+
+
+async def on_startup(app):
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    webhook_url = RENDER_URL.rstrip("/") + "/webhook"
+
+    await telegram_app.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
+
+    logger.info("Telegram webhook configured")
+
+
+async def on_cleanup(app):
+    await telegram_app.bot.delete_webhook()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+
+
+web_app = web.Application()
+web_app.router.add_get("/", health)
+web_app.router.add_get("/health", health)
+web_app.router.add_post("/webhook", webhook_handler)
+
+web_app.on_startup.append(on_startup)
+web_app.on_cleanup.append(on_cleanup)
 
 
 if __name__ == "__main__":
-    main()
+    web.run_app(
+        web_app,
+        host="0.0.0.0",
+        port=PORT,
+    )
