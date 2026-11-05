@@ -42,7 +42,7 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
     raise RuntimeError("Invalid WEBHOOK_SECRET format")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 
 telegram_app = (
     ApplicationBuilder()
