@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bihar CHO Daily Live Quiz - BSc Nursing Lifestyle by Vivek Kumar</title>
+  <style>
+    :root {
+      --primary: #0284c7;
+      --primary-dark: #0369a1;
+      --secondary: #0d9488;
+      --accent: #f59e0b;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --correct: #10b981;
+      --incorrect: #ef4444;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); line-height: 1.5; padding: 15px; }
+    .container { max-width: 750px; margin: 0 auto; }
+    
+    .header-card {
+      background: linear-gradient(135deg, #0369a1, #0d9488);
+      color: white;
+      padding: 24px;
+      border-radius: 16px;
+      text-align: center;
+      box-shadow: 0 10px 25px -5px rgba(2, 132, 199, 0.3);
+      margin-bottom: 20px;
+    }
+    .header-card h1 { font-size: 22px; font-weight: 800; margin-bottom: 6px; letter-spacing: -0.5px; }
+    .header-card .badge {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.2);
+      backdrop-filter: blur(4px);
+      padding: 4px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border-radius: 14px;
+      padding: 20px;
+      border: 1px solid var(--border);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+      margin-bottom: 20px;
+    }
+
+    .form-group { margin-bottom: 15px; text-align: left; }
+    .form-group label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; color: var(--text); }
+    .form-control {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1.5px solid var(--border);
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-control:focus { border-color: var(--primary); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-outline { background: transparent; border: 1.5px solid var(--primary); color: var(--primary); }
+    .btn-whatsapp { background: #25d366; color: white; margin-top: 10px; }
+
+    .quiz-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 15px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .timer-badge {
+      background: #fee2e2;
+      color: #b91c1c;
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    .question-title { font-size: 17px; font-weight: 700; color: #0f172a; margin-bottom: 16px; }
+    .options-grid { display: flex; flex-direction: column; gap: 10px; }
+    .option-btn {
+      padding: 12px 16px;
+      border-radius: 10px;
+      border: 1.5px solid var(--border);
+      background: #f8fafc;
+      text-align: left;
+      font-size: 15px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      color: var(--text);
+    }
+    .option-btn:hover:not(:disabled) { background: #f1f5f9; border-color: #cbd5e1; }
+    .option-btn.correct { background: #ecfdf5 !important; border-color: var(--correct) !important; color: #065f46 !important; font-weight: 600; }
+    .option-btn.incorrect { background: #fef2f2 !important; border-color: var(--incorrect) !important; color: #991b1b !important; }
+
+    .explanation {
+      margin-top: 15px;
+      padding: 14px;
+      background: #eff6ff;
+      border-left: 4px solid var(--primary);
+      border-radius: 6px;
+      font-size: 14px;
+      display: none;
+    }
+
+    .nav-buttons { display: flex; gap: 10px; margin-top: 20px; }
+
+    .leaderboard-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+    .leaderboard-table th, .leaderboard-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    .leaderboard-table th { background: #f1f5f9; color: var(--text-muted); font-weight: 700; }
+    .rank-1 { color: #d97706; font-weight: 800; }
+    .rank-2 { color: #64748b; font-weight: 800; }
+    .rank-3 { color: #b45309; font-weight: 800; }
+
+    .hidden { display: none !important; }
+    .text-center { text-align: center; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header-card">
+    <h1>Bihar CHO 2026 Daily Mock Quiz</h1>
+    <p>Target: 30 High-Yield Questions (GK, Bihar Special & Health Schemes)</p>
+    <div class="badge">Created by: BSc Nursing Lifestyle by Vivek Kumar</div>
+  </div>
+
+  <div id="start-screen" class="card">
+    <h2 style="font-size: 18px; margin-bottom: 14px; text-align: center;">टेस्ट में भाग लेने के लिए अपना विवरण दर्ज करें</h2>
+    <div class="form-group">
+      <label for="student-name">आपका नाम (Full Name) *</label>
+      <input type="text" id="student-name" class="form-control" placeholder="उदा. Rahul Sharma" required>
+    </div>
+    <div class="form-group">
+      <label for="student-district">आपका जिला / कॉलेज (District/College) *</label>
+      <input type="text" id="student-district" class="form-control" placeholder="उदा. Nalanda / Patna" required>
+    </div>
+    <div style="background: #f8fafc; padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 13px; color: var(--text-muted);">
+      ⏱️ कुल प्रश्न: <b>30</b> | कुल समय: <b>25 मिनट</b><br>
+      🏆 टेस्ट सबमिट करते ही आपका नाम <b>Topper Leaderboard</b> में लाइव रैंक के साथ दर्ज हो जाएगा!
+    </div>
+    <button class="btn btn-primary" onclick="startQuiz()">टेस्ट शुरू करें (Start Test)</button>
+    <button class="btn btn-outline" style="margin-top: 10px;" onclick="viewLeaderboardOnly()">सीधे टॉपर लिस्ट देखें (Leaderboard)</button>
+  </div>
+
+  <div id="quiz-screen" class="card hidden">
+    <div class="quiz-toolbar">
+      <span id="progress-text">प्रश्न 1 / 30</span>
+      <span class="timer-badge" id="timer">समय: 25:00</span>
+    </div>
+
+    <div class="question-title" id="question-text">प्रश्न लोड हो रहा है...</div>
+    <div class="options-grid" id="options-container"></div>
+    <div class="explanation" id="explanation-box"></div>
+
+    <div class="nav-buttons">
+      <button class="btn btn-primary" id="next-btn" onclick="nextQuestion()" style="display: none;">अगला प्रश्न (Next)</button>
+    </div>
+  </div>
+
+  <div id="result-screen" class="card hidden">
+    <div class="text-center">
+      <h2 style="color: var(--primary-dark); font-size: 22px;">🎉 टेस्ट संपन्न हुआ!</h2>
+      <p id="student-greeting" style="font-size: 15px; margin-top: 4px; font-weight: 600;"></p>
+      
+      <div style="background: #f0fdf4; border: 1.5px solid var(--correct); padding: 18px; border-radius: 12px; margin: 20px 0;">
+        <div style="font-size: 14px; color: #166534; font-weight: 600;">आपका कुल स्कोर</div>
+        <div style="font-size: 36px; font-weight: 900; color: #15803d;" id="score-display">0 / 30</div>
+        <div id="percentage-display" style="font-size: 14px; color: #166534; margin-top: 4px;">सटीकता: 0%</div>
+      </div>
+
+      <button class="btn btn-whatsapp" onclick="shareOnWhatsApp()">📲 अपना स्कोर व क्विज़ WhatsApp पर शेयर करें</button>
+      <button class="btn btn-outline" style="margin-top: 10px;" onclick="resetQuiz()">पुनः टेस्ट दें (Retake Quiz)</button>
+    </div>
+
+    <div style="margin-top: 30px;">
+      <h3 style="font-size: 17px; border-bottom: 2px solid var(--border); padding-bottom: 6px;">🏆 Toppers Leaderboard (शीर्ष छात्र)</h3>
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th>रैंक</th>
+            <th>अभ्यर्थी का नाम</th>
+            <th>स्थान</th>
+            <th>स्कोर</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body"></tbody>
+      </table>
+      <button class="btn btn-outline" style="margin-top: 15px; font-size: 12px; padding: 6px;" onclick="clearLeaderboard()">लीडरबोर्ड डेटा साफ़ करें (Clear Leaderboard)</button>
+    </div>
+  </div>
+
+  <!-- Instructions & Benefits Section -->
+  <div class="card" style="margin-top: 25px; border-top: 3px solid var(--primary); background: #ffffff;">
+    <h3 style="color: var(--primary-dark); font-size: 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+      📖 इस क्विज़ को कैसे हल करें? (Step-by-Step Instructions)
+    </h3>
+    <ol style="padding-left: 20px; font-size: 14.5px; color: var(--text); line-height: 1.8; margin-bottom: 20px;">
+      <li><b>फाइल ओपन करें:</b> इस लिंक को अपने फोन या कंप्यूटर ब्राउज़र में सीधे खोलें।</li>
+      <li><b>विवरण दर्ज करें:</b> सबसे पहले अपना <b>पूरा नाम</b> और <b>जिला/संस्थान</b> लिखें। यह जानकारी आपके स्कोरकार्ड और लाइव टॉपर लिस्ट में दिखेगी।</li>
+      <li><b>'टेस्ट शुरू करें' पर क्लिक करें:</b> टेस्ट शुरू होते ही 25 मिनट का टाइमर चालू हो जाएगा।</li>
+      <li><b>उत्तर चयन एवं व्याख्या:</b> हर प्रश्न के 4 विकल्पों में से सही उत्तर चुनें। चयन करते ही सही (हरा) या गलत (लाल) उत्तर और उसकी <b>विस्तृत व्याख्या</b> तुरंत दिखाई देगी।</li>
+      <li><b>टेस्ट सबमिट करें:</b> 30 प्रश्न पूरे होने के बाद 'सबमिट' दबाएं। आपका स्कोरकार्ड तुरंत स्क्रीन पर आ जाएगा और आपका नाम <b>Topper Leaderboard</b> में जुड़ जाएगा।</li>
+      <li><b>ग्रुप में शेयर करें:</b> <b>"WhatsApp पर शेयर करें"</b> बटन दबाकर अपने दोस्तों और टेलीग्राम/व्हाट्सएप ग्रुप में अपना रैंक और स्कोर साझा करें।</li>
+    </ol>
+
+    <hr style="border: 0; border-top: 1px dashed var(--border); margin: 18px 0;">
+
+    <h3 style="color: var(--secondary); font-size: 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+      🎯 यह क्विज़ देने के प्रमुख फायदे (Benefits of this Quiz)
+    </h3>
+    <ul style="padding-left: 20px; font-size: 14.5px; color: var(--text); line-height: 1.8;">
+      <li><b>बिहार CHO परीक्षा पैटर्न पर सटीक आधारित:</b> बिहार स्पेशल GK, 2011 जनगणना आंकड़े, राज्य स्वास्थ्य योजनाएं (सात निश्चय-2, बाल हृदय, अश्विन, भव्य) और राष्ट्रीय स्वास्थ्य कार्यक्रमों का पूरा कवरेज।</li>
+      <li><b>रियल टाइम एग्जाम माहौल:</b> 25 मिनट की उलटी गिनती (Timer) से परीक्षा हॉल जैसी स्पीड का अभ्यास।</li>
+      <li><b>इंस्टेंट रिवीजन:</b> केवल सही उत्तर ही नहीं, बल्कि उससे जुड़े महत्वपूर्ण अतिरिक्त तथ्य भी तुरंत याद हो जाते हैं।</li>
+      <li><b>हेल्दी कॉम्पिटिशन:</b> ग्रुप के अन्य छात्रों के बीच अपनी वास्तविक रैंक और तैयारी का स्तर जांचने की सुविधा।</li>
+    </ul>
+
+    <div style="margin-top: 18px; background: #f0fdf4; border-left: 4px solid var(--correct); padding: 12px 14px; border-radius: 6px; font-size: 13.5px; color: #166534; font-weight: 600;">
+      💡 नियमित अभ्यास से सफलता सुनिश्चित करें — <span style="color: #0369a1;">BSc Nursing Lifestyle by Vivek Kumar</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const questions = [
+  { q: "बिहार का राजकीय पक्षी कौन-सा है?", o: ["मोर", "गौरैया (House Sparrow)", "कोयल", "तोता"], a: 1, e: "बिहार का राजकीय पक्षी गौरैया, पशु बैल, वृक्ष पीपल और पुष्प गेंदा है।" },
+  { q: "जनगणना 2011 के अनुसार बिहार की कुल साक्षरता दर कितनी है?", o: ["61.8%", "70.3%", "51.5%", "73.4%"], a: 0, e: "बिहार की साक्षरता दर 61.8% है (पुरुष: 71.2%, महिला: 51.5%)। सबसे साक्षर जिला रोहतास है।" },
+  { q: "बिहार का एकमात्र राष्ट्रीय उद्यान (वाल्मीकि राष्ट्रीय उद्यान) किस जिले में है?", o: ["गया", "पश्चिमी चंपारण", "कैमूर", "रोहतास"], a: 1, e: "वाल्मीकि राष्ट्रीय उद्यान एवं टाइगर रिजर्व पश्चिमी चंपारण (बेतिया) में स्थित है।" },
+  { q: "बिहार की पहली रामसर आर्द्रभूमि (Ramsar Wetland Site) 'काबरताल झील' कहाँ स्थित है?", o: ["कुशेश्वर स्थान", "बरेला", "काबरताल (बेगूसराय)", "गोगाबिल"], a: 2, e: "बेगूसराय में स्थित काबरताल (कंवर झील) बिहार की पहली रामसर साइट है।" },
+  { q: "1857 के प्रथम स्वतंत्रता संग्राम में बिहार का नेतृत्व किसने किया था?", o: ["भिखारी ठाकुर", "बाबू वीर कुंवर सिंह", "स्वामी सहजानंद", "राजकुमार शुक्ल"], a: 1, e: "जगदीशपुर (आरा) के बाबू वीर कुंवर सिंह ने 1857 की क्रांति का नेतृत्व किया था।" },
+  { q: "गंगा नदी बिहार में किस स्थान से प्रवेश करती है?", o: ["चौसा (बक्सर)", "पटना", "भागलपुर", "कटिहार"], a: 0, e: "गंगा नदी बक्सर जिले के चौसा से बिहार में प्रवेश करती है।" },
+  { q: "बिहार में आशा कार्यकर्ताओं के मासिक मानदेय व कार्य सत्यापन हेतु कौन-सा पोर्टल है?", o: ["ई-संजीवनी", "अश्विन पोर्टल (ASHWIN)", "भव्य पोर्टल", "मेधासॉफ्ट"], a: 1, e: "राज्य स्वास्थ्य समिति बिहार (SHSB) द्वारा आशा के भुगतान हेतु ASHWIN पोर्टल संचालित है।" },
+  { q: "सात निश्चय-2 (2020-2025) के अंतर्गत स्वास्थ्य से संबंधित घटक कौन-सा है?", o: ["स्वच्छ गांव", "सबके लिए अतिरिक्त स्वास्थ्य सुविधा", "हर घर नल", "युवा शक्ति"], a: 1, e: "'सबके लिए अतिरिक्त स्वास्थ्य सुविधा' के तहत टेली-मेडिसिन और बाल हृदय योजना आते हैं।" },
+  { q: "'मुख्यमंत्री बाल हृदय योजना' में किस बीमारी से ग्रसित बच्चों का मुफ्त ऑपरेशन कराया जाता है?", o: ["जन्मजात हृदय रोग (दिल में छेद)", "सिकल सेल एनीमिया", "गंभीर कुपोषण", "टाइप-1 डायबिटीज"], a: 0, e: "जन्मजात दिल की बीमारी से पीड़ित बच्चों को अहमदाबाद ले जाकर मुफ्त इलाज कराया जाता है।" },
+  { q: "बिहार के सरकारी अस्पतालों में HMIS (अस्पताल डिजिटलीकरण) हेतु कौन-सा सॉफ्टवेयर लागू है?", o: ["भव्य (BHABHYA)", "दीक्षा", "ई-हॉस्पिटल", "आरोग्य सेतु"], a: 0, e: "BHABHYA (Bihar Health Application) बिहार स्वास्थ्य विभाग का संपूर्ण डिजिटल रिकॉर्ड सॉफ्टवेयर है।" },
+  { q: "बिहार राज्य में कुल कितने प्रशासनिक प्रमंडल (Divisions) हैं?", o: ["7", "9", "11", "38"], a: 1, e: "बिहार में 9 प्रमंडल और 38 जिले हैं। 38वाँ जिला अरवल है।" },
+  { q: "जननी सुरक्षा योजना (JSY) के तहत बिहार के ग्रामीण क्षेत्र में संस्थागत प्रसव पर प्रोत्साहन राशि कितनी है?", o: ["₹1,000", "₹1,400", "₹2,000", "₹5,000"], a: 1, e: "कम प्रदर्शन वाले राज्यों (LPS) में ग्रामीण महिला को ₹1400 और शहरी को ₹1000 दिए जाते हैं।" },
+  { q: "आयुष्मान भारत हेल्थ एंड वेलनेस सेंटर (AB-HWC) का नया नाम क्या रखा गया है?", o: ["आयुष्मान आरोग्य मंदिर", "प्रधानमंत्री आरोग्य केंद्र", "अटल स्वास्थ्य केंद्र", "जन आरोग्य केंद्र"], a: 0, e: "AB-HWCs का नया नाम 'आयुष्मान आरोग्य मंदिर' और टैगलाइन 'आरोग्यम् परमं धनम्' है।" },
+  { q: "NTEP के अनुसार भारत को किस वर्ष तक टीबी मुक्त बनाने का राष्ट्रीय लक्ष्य है?", o: ["2025", "2030", "2027", "2028"], a: 0, e: "भारत सरकार ने 2025 तक टीबी उन्मूलन का राष्ट्रीय लक्ष्य निर्धारित किया है।" },
+  { q: "निक्षय पोषण योजना के तहत टीबी रोगी को प्रति माह पोषण हेतु कितनी राशि दी जाती है?", o: ["₹200", "₹500", "₹1,000", "₹1,500"], a: 1, e: "इलाज के दौरान पोषण सहायता के रूप में ₹500 प्रति माह DBT द्वारा दिए जाते हैं।" },
+  { q: "मिशन इंद्रधनुष (Mission Indradhanush) का प्राथमिक उद्देश्य क्या है?", o: ["शत-प्रतिशत पूर्ण टीकाकरण (Full Immunization)", "कुपोषण मुक्ति", "नेत्र सुरक्षा", "जल शुद्धिकरण"], a: 0, e: "गर्भवती महिलाओं और 2 वर्ष तक के बच्चों का 100% टीकाकरण सुनिश्चित करना इसका लक्ष्य है।" },
+  { q: "नवजात शिशु के जन्म के तुरंत बाद (Birth Dose) कौन-से टीके दिए जाते हैं?", o: ["BCG, OPV 0, Hep-B", "DPT, Polio, Measles", "Pentavalent, Rota", "MMR, Vitamin A"], a: 0, e: "जन्म के 24 घंटे के भीतर BCG, Zero Dose OPV और Hepatitis-B Birth Dose दी जाती है।" },
+  { q: "शिशु को विटामिन-A की पहली खुराक किस उम्र में दी जाती है?", o: ["जन्म पर", "9 महीने की उम्र में (खसरे के टीके के साथ)", "6 हफ्ते पर", "1 साल पर"], a: 1, e: "9 महीने पर Measles/MR के साथ 1 लाख IU विटामिन A ओरल दिया जाता है।" },
+  { q: "प्रधानमंत्री जन आरोग्य योजना (PM-JAY) में प्रति परिवार वार्षिक बीमा कवर कितना है?", o: ["₹2 लाख", "₹5 लाख", "₹10 लाख", "₹1 लाख"], a: 1, e: "प्रति पात्र परिवार प्रति वर्ष 5 लाख रुपये तक का कैशलेस स्वास्थ्य कवर मिलता है।" },
+  { q: "विश्व स्वास्थ्य संगठन (WHO) का स्थापना दिवस कब मनाया जाता है?", o: ["7 अप्रैल (1948)", "1 दिसंबर", "24 मार्च", "11 जुलाई"], a: 0, e: "7 अप्रैल 1948 को WHO की स्थापना हुई थी, इसीलिए 7 अप्रैल को विश्व स्वास्थ्य दिवस मनाते हैं।" },
+  { q: "NVBDCP के अंतर्गत इनमें से कौन-सा रोग शामिल नहीं है?", o: ["मलेरिया", "डेंगू", "कालाजार", "तपेदिक (Tuberculosis)"], a: 3, e: "तपेदिक (TB) बैक्टीरिया जनित रोग है जो NTEP के अंतर्गत आता है, NVBDCP में नहीं।" },
+  { q: "आशा (ASHA) का पूर्ण रूप क्या है?", o: ["Accredited Social Health Activist", "Associated Social Health Agent", "Active Sanitary Health Aide", "Auxiliary Social Health Assistant"], a: 0, e: "ASHA का पूर्ण रूप 'Accredited Social Health Activist' होता है।" },
+  { q: "भारतीय संविधान का कौन-सा अनुच्छेद लोक स्वास्थ्य (Public Health) सुधारने का निर्देश देता है?", o: ["अनुच्छेद 21", "अनुच्छेद 47", "अनुच्छेद 39", "अनुच्छेद 51"], a: 1, e: "अनुच्छेद 47 (DPSP) में लोक स्वास्थ्य और पोषण स्तर में सुधार को राज्य का प्राथमिक कर्तव्य कहा गया है।" },
+  { q: "HWC स्तर पर तैनात कम्युनिटी हेल्थ ऑफिसर (CHO) किस कैडर में आते हैं?", o: ["मिड-लेवल हेल्थ प्रोवाइडर (MLHP)", "सिविल सर्जन", "मेडिकल स्पेशलिस्ट", "ब्लॉक प्रोग्राम मैनेजर"], a: 0, e: "CHO को मिड-लेवल हेल्थ प्रोवाइडर (MLHP) कहा जाता है जो प्राथमिक स्वास्थ्य सेवाएं देते हैं।" },
+  { q: "प्राइमरी हेल्थ केयर की ऐतिहासिक 'अल्मा-अटा घोषणा' किस वर्ष हुई थी?", o: ["1978", "1985", "1992", "2000"], a: 0, e: "1978 में अल्मा-अटा सम्मेलन में 'Health for All by 2000 AD' का संकल्प लिया गया था।" },
+  { q: "गर्भावस्था के दौरान न्यूनतम कितनी ANC जांचें अनुशंसित हैं?", o: ["1", "2", "कम से कम 4", "6"], a: 2, e: "मातृ-शिशु सुरक्षा हेतु गर्भावस्था में न्यूनतम 4 ANC जांचें अनिवार्य मानी जाती हैं।" },
+  { q: "शिशु जन्म के बाद स्तनपान (Breastfeeding) कब शुरू किया जाना चाहिए?", o: ["1 घंटे के भीतर (Within 1 hour)", "24 घंटे बाद", "3 दिन बाद", "स्नान के बाद"], a: 0, e: "संस्थागत प्रसव में सामान्य जन्म के 1 घंटे के भीतर शीघ्र स्तनपान (Early Initiation) शुरू होना चाहिए।" },
+  { q: "नए WHO-ORS फार्मूले में प्रति लीटर पानी में सोडियम क्लोराइड की मात्रा कितनी होती है?", o: ["3.5 ग्राम", "2.6 ग्राम", "1.5 ग्राम", "2.9 ग्राम"], a: 1, e: "कम ऑस्मोलैरिटी ORS में 2.6g सोडियम क्लोराइड और 13.5g ग्लूकोज होता है।" },
+  { q: "किसी क्षेत्र में बीमारी के मामलों की अप्रत्याशित और अचानक वृद्धि को क्या कहते हैं?", o: ["महामारी (Epidemic)", "स्थानिकमारी (Endemic)", "पेंडेमिक", "स्पोरेडिक"], a: 0, e: "किसी निश्चित समुदाय में किसी बीमारी का अचानक सामान्य स्तर से अधिक फैलना Epidemic कहलाता है।" },
+  { q: "ग्रामीण क्षेत्रों में त्रि-स्तरीय स्वास्थ्य संरचना की सबसे प्राथमिक बुनियादी इकाई कौन-सी है?", o: ["स्वास्थ्य उप-केंद्र (Sub-Centre / HWC)", "PHC", "CHC", "सदर अस्पताल"], a: 0, e: "ग्रामीण स्तर पर सबसे प्राथमिक इकाई उप-केंद्र (Sub-Centre / Ayushman Arogya Mandir) होती है।" }
+];
+
+let currentIdx = 0;
+let userScore = 0;
+let studentName = "";
+let studentDistrict = "";
+let timerInterval = null;
+let timeLeft = 25 * 60;
+
+function startQuiz() {
+  const nameInput = document.getElementById("student-name").value.trim();
+  const distInput = document.getElementById("student-district").value.trim();
+  if (!nameInput || !distInput) {
+    alert("कृपया टेस्ट शुरू करने से पहले अपना नाम और जिला दर्ज करें!");
+    return;
+  }
+  studentName = nameInput;
+  studentDistrict = distInput;
+
+  document.getElementById("start-screen").classList.add("hidden");
+  document.getElementById("quiz-screen").classList.remove("hidden");
+
+  loadQuestion();
+  startTimer();
+}
+
+function startTimer() {
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    const mins = Math.floor(timeLeft / 60);
+    const secs = timeLeft % 60;
+    document.getElementById("timer").innerText = `समय: ${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      finishQuiz();
+    }
+  }, 1000);
+}
+
+function loadQuestion() {
+  const qData = questions[currentIdx];
+  document.getElementById("progress-text").innerText = `प्रश्न ${currentIdx + 1} / ${questions.length}`;
+  document.getElementById("question-text").innerText = `${currentIdx + 1}. ${qData.q}`;
+  
+  const optContainer = document.getElementById("options-container");
+  optContainer.innerHTML = "";
+  
+  const expBox = document.getElementById("explanation-box");
+  expBox.style.display = "none";
+  expBox.innerHTML = "";
+  document.getElementById("next-btn").style.display = "none";
+
+  qData.o.forEach((optText, i) => {
+    const btn = document.createElement("button");
+    btn.className = "option-btn";
+    btn.innerText = optText;
+    btn.onclick = () => selectOption(i);
+    optContainer.appendChild(btn);
+  });
+}
+
+function selectOption(selectedIdx) {
+  const qData = questions[currentIdx];
+  const buttons = document.querySelectorAll(".option-btn");
+  buttons.forEach(btn => btn.disabled = true);
+
+  if (selectedIdx === qData.a) {
+    buttons[selectedIdx].classList.add("correct");
+    userScore++;
+  } else {
+    buttons[selectedIdx].classList.add("incorrect");
+    buttons[qData.a].classList.add("correct");
+  }
+
+  const expBox = document.getElementById("explanation-box");
+  expBox.innerHTML = `<b>सही उत्तर:</b> ${qData.o[qData.a]}<br><b>व्याख्या:</b> ${qData.e}`;
+  expBox.style.display = "block";
+
+  const nextBtn = document.getElementById("next-btn");
+  nextBtn.style.display = "block";
+  if (currentIdx === questions.length - 1) {
+    nextBtn.innerText = "टेस्ट सबमिट करें (Submit Quiz)";
+  }
+}
+
+function nextQuestion() {
+  if (currentIdx < questions.length - 1) {
+    currentIdx++;
+    loadQuestion();
+  } else {
+    finishQuiz();
+  }
+}
+
+function finishQuiz() {
+  clearInterval(timerInterval);
+  document.getElementById("quiz-screen").classList.add("hidden");
+  document.getElementById("result-screen").classList.remove("hidden");
+
+  document.getElementById("student-greeting").innerText = `${studentName} (${studentDistrict})`;
+  document.getElementById("score-display").innerText = `${userScore} / ${questions.length}`;
+  const pct = Math.round((userScore / questions.length) * 100);
+  document.getElementById("percentage-display").innerText = `सटीकता (Accuracy): ${pct}%`;
+
+  saveScoreToLeaderboard(studentName, studentDistrict, userScore);
+  renderLeaderboard();
+}
+
+function saveScoreToLeaderboard(name, district, score) {
+  let board = JSON.parse(localStorage.getItem("bihar_cho_toppers") || "[]");
+  board.push({ name: name, district: district, score: score, time: new Date().toLocaleDateString('en-GB') });
+  board.sort((a, b) => b.score - a.score);
+  localStorage.setItem("bihar_cho_toppers", JSON.stringify(board));
+}
+
+function renderLeaderboard() {
+  const board = JSON.parse(localStorage.getItem("bihar_cho_toppers") || "[]");
+  const tbody = document.getElementById("leaderboard-body");
+  tbody.innerHTML = "";
+
+  if (board.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color: #94a3b8;">अभी तक कोई टेस्ट रिकॉर्ड नहीं है।</td></tr>`;
+    return;
+  }
+
+  board.slice(0, 10).forEach((entry, idx) => {
+    const tr = document.createElement("tr");
+    let rankBadge = idx + 1;
+    if (idx === 0) rankBadge = "🥇 1";
+    if (idx === 1) rankBadge = "🥈 2";
+    if (idx === 2) rankBadge = "🥉 3";
+
+    tr.innerHTML = `
+      <td class="rank-${idx + 1}">${rankBadge}</td>
+      <td><b>${entry.name}</b></td>
+      <td>${entry.district}</td>
+      <td><span style="background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 4px; font-weight:700;">${entry.score}/30</span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function viewLeaderboardOnly() {
+  document.getElementById("start-screen").classList.add("hidden");
+  document.getElementById("result-screen").classList.remove("hidden");
+  document.getElementById("student-greeting").innerText = "अभ्यर्थी लीडरबोर्ड";
+  document.getElementById("score-display").innerText = "-- / 30";
+  document.getElementById("percentage-display").innerText = "सभी छात्रों का प्रदर्शन";
+  renderLeaderboard();
+}
+
+function clearLeaderboard() {
+  if (confirm("क्या आप लीडरबोर्ड का सारा पुराना डेटा साफ़ करना चाहते हैं?")) {
+    localStorage.removeItem("bihar_cho_toppers");
+    renderLeaderboard();
+  }
+}
+
+function resetQuiz() {
+  location.reload();
+}
+
+function shareOnWhatsApp() {
+  const text = `🩺 *Bihar CHO 2026 Daily Mock Quiz*\n*BSc Nursing Lifestyle by Vivek Kumar*\n\n👤 नाम: ${studentName} (${studentDistrict})\n🎯 मेरा स्कोर: ${userScore}/30 (${Math.round((userScore/30)*100)}%)\n\nक्या आप मुझे हरा सकते हैं? अभी क्विज़ हल करें और लीडरबोर्ड में टॉप करें!`;
+  window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
+}
+</script>
+</body>
+</html>
