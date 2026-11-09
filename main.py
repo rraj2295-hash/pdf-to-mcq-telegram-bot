@@ -48,18 +48,47 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Models to attempt in priority order
-MODELS_TO_TRY = [
-    "gemini-3.0-flash",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-]
-
 telegram_app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
     .build()
 )
+
+
+# ================ AUTO-DISCOVERY MODEL RESOLVER ================
+
+def get_available_models():
+    """Queries Google API to find exactly which models are supported on this key."""
+    discovered = []
+    try:
+        for m in client.models.list():
+            # Extract clean model name
+            m_name = getattr(m, "name", str(m))
+            clean_name = m_name.replace("models/", "")
+            
+            # Check supported actions if metadata is available
+            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_actions", None)
+            if methods:
+                if any("generateContent" in str(action) for action in methods):
+                    discovered.append(clean_name)
+            else:
+                discovered.append(clean_name)
+    except Exception as exc:
+        logger.warning("Auto model discovery via list() failed: %s", exc)
+
+    # Sort discovered to prioritize flash versions
+    flash_models = [m for m in discovered if "flash" in m.lower() and "8b" not in m.lower()]
+    other_gemini = [m for m in discovered if "gemini" in m.lower() and m not in flash_models]
+    
+    final_candidates = flash_models + other_gemini + discovered
+    
+    # Static fallbacks just in case list API is restricted
+    fallbacks = ["gemini-3.0-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    for fb in fallbacks:
+        if fb not in final_candidates:
+            final_candidates.append(fb)
+
+    return final_candidates
 
 
 # ================ START COMMAND ================
@@ -125,60 +154,69 @@ PDF TEXT:
 {pdf_text[:60000]}
 """
 
+    candidate_models = get_available_models()
+    logger.info("Candidate models to attempt: %s", candidate_models)
+
     last_error = None
 
-    for model_name in MODELS_TO_TRY:
-        retry_delays = [5, 10]
-        logger.info("Attempting MCQ generation with model: %s", model_name)
+    for model_name in candidate_models:
+        logger.info("Testing candidate model: %s", model_name)
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.2,
+                },
+            )
 
-        for attempt in range(len(retry_delays) + 1):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "temperature": 0.2,
-                    },
-                )
+            if not response.text:
+                raise ValueError("Gemini returned empty response")
 
-                if not response.text:
-                    raise ValueError("Gemini returned empty response")
+            data = json.loads(response.text)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid JSON format received")
 
-                data = json.loads(response.text)
-                if not isinstance(data, dict):
-                    raise ValueError("Invalid JSON response")
+            questions = data.get("questions", [])
+            if not isinstance(questions, list):
+                raise ValueError("Invalid questions list")
 
-                questions = data.get("questions", [])
-                if not isinstance(questions, list):
-                    raise ValueError("Invalid questions list")
+            logger.info("Successfully generated %s questions with model: %s", len(questions), model_name)
+            return questions[:30]
 
-                logger.info("Successfully generated %s questions with %s", len(questions), model_name)
-                return questions[:30]
+        except Exception as exc:
+            last_error = exc
+            err_msg = str(exc).upper()
+            logger.warning("Model candidate %s failed: %s", model_name, exc)
 
-            except Exception as exc:
-                last_error = exc
-                error_text = str(exc).upper()
+            # If 404 or NOT_FOUND, immediately try next candidate model
+            if "404" in err_msg or "NOT_FOUND" in err_msg:
+                continue
 
-                if "404" in error_text or "NOT_FOUND" in error_text:
-                    logger.warning("Model %s returned 404, falling back to next model...", model_name)
-                    break
-
-                temporary_errors = (
-                    "503", "429", "500", "502", "504",
-                    "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"
-                )
-
-                if any(err in error_text for err in temporary_errors) and attempt < len(retry_delays):
-                    delay = retry_delays[attempt]
-                    logger.warning("Temporary Gemini error. Retrying in %ss: %s", delay, exc)
-                    time.sleep(delay)
+            # If temporary rate limit / server error, retry once after short delay
+            if any(code in err_msg for code in ("429", "500", "503", "504", "RESOURCE_EXHAUSTED")):
+                time.sleep(3)
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config={
+                            "response_mime_type": "application/json",
+                            "temperature": 0.2,
+                        },
+                    )
+                    if response.text:
+                        data = json.loads(response.text)
+                        questions = data.get("questions", [])
+                        if isinstance(questions, list):
+                            return questions[:30]
+                except Exception as retry_exc:
+                    last_error = retry_exc
                     continue
 
-                break
-
-    logger.exception("All Gemini models failed")
-    raise last_error if last_error else RuntimeError("Gemini MCQ generation failed")
+    logger.exception("All model candidates exhausted")
+    raise last_error if last_error else RuntimeError("Gemini MCQ generation failed on all models")
 
 
 # ================ PDF HANDLER ================
