@@ -34,7 +34,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
-# Clean target channel id (removes any hidden space or newline)
+# Target Channel / Group (e.g. @CHO26_27 ya -100xxxxxxxxxx)
 raw_channel = os.environ.get("TARGET_CHANNEL_ID", "")
 TARGET_CHANNEL_ID = raw_channel.strip() if raw_channel else None
 
@@ -339,7 +339,6 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Questions expire ho chuke hain. Kripya PDF dobara bhejein.")
         return
 
-    # Clean target chat
     target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
     target_display = target_destination
 
@@ -386,7 +385,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 type="quiz",
                 correct_option_id=keys.index(answer),
                 explanation=explanation or None,
-                is_anonymous=False,
+                is_anonymous=True,  # Mandatory for Telegram Channels
                 open_period=seconds,
             )
             sent += 1
@@ -394,8 +393,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as poll_err:
             fail_reason = str(poll_err)
-            logger.exception("Failed to send poll to destination %s: %s", target_destination, poll_err)
-            # Agar chat not found ya permission error hai to aage loop na chalayein
+            logger.exception("Failed to send poll to %s: %s", target_destination, poll_err)
             break
 
     context.user_data.pop("pending_questions", None)
@@ -412,9 +410,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ Questions channel me send nahi ho sake!\n\n"
             f"Target: {target_display}\n"
             f"Reason: {fail_reason}\n\n"
-            "Kripya check karein ki:\n"
-            "1. Bot channel me Admin hai ya nahi.\n"
-            "2. Bot ke paas 'Post Messages' permission hai ya nahi."
+            "Kripya check karein ki bot channel me admin hai ya nahi."
         )
 
     await context.bot.send_message(
