@@ -48,7 +48,8 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL = "gemini-2.5-flash"
+# Active Gemini Model
+MODEL = "gemini-2.0-flash"
 
 telegram_app = (
     ApplicationBuilder()
@@ -400,7 +401,7 @@ telegram_app.add_handler(CallbackQueryHandler(timer_callback))
 # ================ WEBHOOK HANDLER ================
 
 async def webhook_handler(request):
-    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    supplied_secret = request.headers.get("X-Telegram-Api-Secret-Token", "")
 
     if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
         raise web.HTTPForbidden(text="Invalid webhook secret")
