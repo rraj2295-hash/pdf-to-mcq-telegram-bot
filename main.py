@@ -14,6 +14,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    PollAnswerHandler,
     ContextTypes,
     filters,
 )
@@ -34,7 +35,6 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
-# Target Channel / Group (e.g. @CHO26_27 ya -100xxxxxxxxxx)
 raw_channel = os.environ.get("TARGET_CHANNEL_ID", "")
 TARGET_CHANNEL_ID = raw_channel.strip() if raw_channel else None
 
@@ -55,11 +55,14 @@ telegram_app = (
     .build()
 )
 
+# Global trackers for live session
+ACTIVE_POLLS = {}
+USER_SCORES = {}
+
 
 # ================ AUTO-DISCOVERY MODEL RESOLVER ================
 
 def get_available_models():
-    """Queries Google API to find exactly which models are supported on this key."""
     discovered = []
     try:
         for m in client.models.list():
@@ -67,13 +70,12 @@ def get_available_models():
             clean_name = m_name.replace("models/", "")
             discovered.append(clean_name)
     except Exception as exc:
-        logger.warning("Auto model discovery via list() failed: %s", exc)
+        logger.warning("Auto model discovery failed: %s", exc)
 
     flash_models = [m for m in discovered if "flash" in m.lower() and "8b" not in m.lower()]
     other_gemini = [m for m in discovered if "gemini" in m.lower() and m not in flash_models]
     
     final_candidates = flash_models + other_gemini + discovered
-    
     fallbacks = ["gemini-3.0-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     for fb in fallbacks:
         if fb not in final_candidates:
@@ -82,53 +84,48 @@ def get_available_models():
     return final_candidates
 
 
-# ================ START COMMAND ================
+# ================ START & HELP ================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
-        "📚 Send a text-based PDF file.\n\n"
-        "PDF bhejne ke baad bot timer select karne bolega.\n\n"
-        "Best of luck for Bihar CHO preparation! 🩺"
+        "📚 Send a text-based PDF file.\n"
+        "PDF bhejne ke baad timer select karein.\n\n"
+        "Bot automated numbering, topic banner aur leaderboard create karega! 🩺"
     )
 
-
-# ================ HELP COMMAND ================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "📖 Bihar CHO Quiz Bot Help\n\n"
         "/start - Start the Bot\n"
-        "/help - Show instructions\n\n"
-        "Send a PDF to generate MCQ quizzes."
+        "/help - Instructions\n"
+        "Send a PDF to generate automated quizzes with leaderboards."
     )
 
 
-# ================ GEMINI MCQ GENERATION ================
+# ================ GEMINI MCQ & TOPIC GENERATION ================
 
-def generate_questions(pdf_text):
+def generate_quiz_payload(pdf_text):
     prompt = f"""
 You are an expert nursing examination question creator.
 
-Create up to 30 MCQs from the supplied PDF.
+1. Identify a suitable short topic title for this nursing study material (max 6 words).
+2. Create up to 30 MCQs from the supplied PDF text.
 
 Rules:
-1. Use only information in the PDF.
-2. Each question must have exactly four options.
-3. Give exactly one correct answer.
-4. Do not invent facts.
-5. Include rationale only if explicitly explained in PDF.
-6. Otherwise rationale must be an empty string.
-7. Avoid duplicate questions.
-8. Return fewer questions if PDF has insufficient content.
+- Use only facts from the PDF.
+- Each question must have exactly four options (A, B, C, D).
+- Specify the correct answer clearly.
+- Add concise rationale if available.
 
-Return only valid JSON in this format:
-
+Return valid JSON in this exact structure:
 {{
+  "topic": "Topic Title Here",
   "questions": [
     {{
       "number": 1,
-      "question": "Question text",
+      "question": "Question text without numbering prefix",
       "options": {{
         "A": "Option A",
         "B": "Option B",
@@ -146,8 +143,6 @@ PDF TEXT:
 """
 
     candidate_models = get_available_models()
-    logger.info("Candidate models to attempt: %s", candidate_models)
-
     last_error = None
 
     for model_name in candidate_models:
@@ -162,49 +157,61 @@ PDF TEXT:
             )
 
             if not response.text:
-                raise ValueError("Gemini returned empty response")
+                raise ValueError("Empty response from model")
 
             data = json.loads(response.text)
             if not isinstance(data, dict):
-                raise ValueError("Invalid JSON format received")
+                raise ValueError("Invalid JSON")
 
             questions = data.get("questions", [])
-            if not isinstance(questions, list):
-                raise ValueError("Invalid questions list")
+            topic = data.get("topic", "Bihar CHO Nursing Mock Test")
 
-            logger.info("Successfully generated %s questions with model: %s", len(questions), model_name)
-            return questions[:30]
+            if isinstance(questions, list) and len(questions) > 0:
+                return topic, questions[:30]
 
         except Exception as exc:
             last_error = exc
             err_msg = str(exc).upper()
-            logger.warning("Model candidate %s failed: %s", model_name, exc)
-
             if "404" in err_msg or "NOT_FOUND" in err_msg:
                 continue
 
-            if any(code in err_msg for code in ("429", "500", "503", "504", "RESOURCE_EXHAUSTED")):
-                time.sleep(3)
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config={
-                            "response_mime_type": "application/json",
-                            "temperature": 0.2,
-                        },
-                    )
-                    if response.text:
-                        data = json.loads(response.text)
-                        questions = data.get("questions", [])
-                        if isinstance(questions, list):
-                            return questions[:30]
-                except Exception as retry_exc:
-                    last_error = retry_exc
-                    continue
+            time.sleep(2)
+            continue
 
-    logger.exception("All model candidates exhausted")
-    raise last_error if last_error else RuntimeError("Gemini MCQ generation failed on all models")
+    raise last_error if last_error else RuntimeError("Gemini generation failed")
+
+
+# ================ POLL ANSWER TRACKER (LEADERBOARD) ================
+
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = update.poll_answer
+    poll_id = answer.poll_id
+    user = answer.user
+
+    if poll_id not in ACTIVE_POLLS:
+        return
+
+    poll_info = ACTIVE_POLLS[poll_id]
+    correct_id = poll_info["correct_option_id"]
+    start_time = poll_info["timestamp"]
+    elapsed = max(1.0, round(time.time() - start_time, 1))
+
+    user_id = user.id
+    user_name = user.full_name or user.username or f"Student_{user_id}"
+
+    if user_id not in USER_SCORES:
+        USER_SCORES[user_id] = {
+            "name": user_name,
+            "correct": 0,
+            "attempted": 0,
+            "total_time": 0.0,
+        }
+
+    USER_SCORES[user_id]["attempted"] += 1
+    USER_SCORES[user_id]["total_time"] += elapsed
+
+    if answer.option_ids and answer.option_ids[0] == correct_id:
+        USER_SCORES[user_id]["correct"] += 1
 
 
 # ================ PDF HANDLER ================
@@ -213,12 +220,8 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     document = message.document
 
-    if (
-        not document
-        or not document.file_name
-        or not document.file_name.lower().endswith(".pdf")
-    ):
-        await message.reply_text("Please send a PDF file.")
+    if not document or not document.file_name or not document.file_name.lower().endswith(".pdf"):
+        await message.reply_text("Please send a valid PDF file.")
         return
 
     if document.file_size and document.file_size > 20 * 1024 * 1024:
@@ -227,12 +230,11 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await message.reply_text(
         "📥 PDF received!\n"
-        "⏳ Reading PDF and creating MCQs with Gemini AI...\n"
+        "⏳ Reading PDF, determining Topic and creating MCQs...\n"
         "Please wait..."
     )
 
     temp_path = None
-
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
             temp_path = temp.name
@@ -241,37 +243,24 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pdf_file.download_to_drive(temp_path)
 
         reader = PdfReader(temp_path)
-
         if reader.is_encrypted:
             raise ValueError("Encrypted PDF is not supported")
 
-        pdf_text = "\n".join(
-            page.extract_text() or ""
-            for page in reader.pages
-        )
-
+        pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
         if len(pdf_text.strip()) < 100:
-            await status_msg.edit_text(
-                "❌ PDF text could not be read.\n"
-                "Please send a text-based PDF, not a scanned PDF."
-            )
+            await status_msg.edit_text("❌ Text could not be read. Please send a text-based PDF.")
             return
 
-        questions = await asyncio.to_thread(
-            generate_questions,
-            pdf_text
-        )
+        topic, questions = await asyncio.to_thread(generate_quiz_payload, pdf_text)
 
         if not questions:
-            await status_msg.edit_text(
-                "No MCQs could be generated from this PDF."
-            )
+            await status_msg.edit_text("No MCQs could be generated.")
             return
 
         context.user_data["pending_questions"] = questions
+        context.user_data["pending_topic"] = topic
         context.user_data["reply_chat_id"] = message.chat_id
 
-        # Timer selection buttons
         keyboard = [
             [
                 InlineKeyboardButton("⏱️ 15s", callback_data="timer_15"),
@@ -285,45 +274,25 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await status_msg.edit_text(
-            f"✅ {len(questions)} Questions generate ho gaye hain!\n\n"
+            f"📖 **Topic**: {topic}\n"
+            f"📊 **Total Questions**: {len(questions)}\n\n"
             "⏱️ Har question ke liye **Timer kitne seconds** ka rakhna hai? Select karein:",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
 
     except Exception as exc:
         logger.exception("PDF processing failed")
-        error_text = str(exc).upper()
-
-        if any(
-            code in error_text
-            for code in ("503", "429", "500", "502", "504",
-                         "UNAVAILABLE", "RESOURCE_EXHAUSTED")
-        ):
-            user_message = (
-                "⚠️ Gemini AI is temporarily busy.\n\n"
-                "Please try sending your PDF again after a few minutes."
-            )
-        elif "API KEY" in error_text or "API_KEY" in error_text:
-            user_message = (
-                "❌ Gemini API Key problem.\n"
-                "Please check GEMINI_API_KEY in Render Environment."
-            )
-        else:
-            user_message = (
-                "❌ PDF processing failed.\n\n"
-                "Please check the PDF and try again."
-            )
-
-        await status_msg.edit_text(user_message)
-
+        await status_msg.edit_text(f"❌ PDF processing failed: {exc}")
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
-# ================ TIMER BUTTON CALLBACK HANDLER ================
+# ================ TIMER CALLBACK & DISPATCHER ================
 
 async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ACTIVE_POLLS, USER_SCORES
     query = update.callback_query
     await query.answer()
 
@@ -333,6 +302,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     seconds = int(data.split("_")[1])
     questions = context.user_data.get("pending_questions", [])
+    topic = context.user_data.get("pending_topic", "Bihar CHO Nursing Mock Test")
     reply_chat_id = context.user_data.get("reply_chat_id", query.message.chat_id)
 
     if not questions:
@@ -340,18 +310,49 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
-    target_display = target_destination
+    total_q = len(questions)
+
+    # Reset scoreboards for this test session
+    ACTIVE_POLLS = {}
+    USER_SCORES = {}
 
     await query.edit_message_text(
-        f"⏳ Timer set to {seconds} seconds.\n"
-        f"Channel ({target_display}) me questions bhejna start ho raha hai..."
+        f"⏳ Timer: {seconds}s per question.\n"
+        f"Target: {target_destination}\n"
+        "Sending announcement and initiating Quiz..."
     )
+
+    # 1. Starting Announcement Message
+    intro_banner = (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🎯 **BIHAR CHO DAILY QUIZ TEST** 🩺\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📖 **Topic:** {topic}\n"
+        f"❓ **Total Questions:** {total_q}\n"
+        f"⏱️ **Time per Question:** {seconds} Seconds\n\n"
+        "👉 *Har question ka countdown timer chalu rahega. Best of luck!*"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_destination,
+            text=intro_banner,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.warning("Intro banner send failed: %s", e)
+
+    await asyncio.sleep(2)
 
     sent = 0
     fail_reason = ""
     keys = ["A", "B", "C", "D"]
 
-    for q in questions:
+    # Channel chats strictly require is_anonymous=True, groups allow interactive false
+    is_channel = str(target_destination).startswith("-100") or str(target_destination).startswith("@")
+    is_anonymous_mode = True if is_channel else False
+
+    for idx, q in enumerate(questions, start=1):
         if not isinstance(q, dict):
             continue
 
@@ -359,63 +360,104 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not isinstance(options, dict):
             continue
 
-        question = str(q.get("question", "")).strip()
+        clean_q = str(q.get("question", "")).strip()
         answer = str(q.get("answer", "")).strip().upper()
 
         if (
-            not question
-            or len(question) > 300
+            not clean_q
+            or len(clean_q) > 280
             or answer not in keys
-            or any(
-                not isinstance(options.get(k), str)
-                or not options[k].strip()
-                or len(options[k]) > 100
-                for k in keys
-            )
+            or any(not isinstance(options.get(k), str) or not options[k].strip() or len(options[k]) > 100 for k in keys)
         ):
             continue
 
+        # Add question numbering prefix: Q1., Q2., etc.
+        formatted_question = f"Q{idx}. {clean_q}"
         explanation = str(q.get("rationale", "")).strip()[:200]
+        correct_opt_id = keys.index(answer)
 
         try:
-            await context.bot.send_poll(
+            poll_msg = await context.bot.send_poll(
                 chat_id=target_destination,
-                question=question,
+                question=formatted_question,
                 options=[options[k].strip() for k in keys],
                 type="quiz",
-                correct_option_id=keys.index(answer),
+                correct_option_id=correct_opt_id,
                 explanation=explanation or None,
-                is_anonymous=True,  # Mandatory for Telegram Channels
+                is_anonymous=is_anonymous_mode,
                 open_period=seconds,
             )
+
+            # Store poll for real-time answer tracking
+            if poll_msg.poll:
+                ACTIVE_POLLS[poll_msg.poll.id] = {
+                    "correct_option_id": correct_opt_id,
+                    "timestamp": time.time(),
+                }
+
             sent += 1
             await asyncio.sleep(seconds + 2)
 
         except Exception as poll_err:
             fail_reason = str(poll_err)
-            logger.exception("Failed to send poll to %s: %s", target_destination, poll_err)
+            logger.exception("Poll failed: %s", poll_err)
             break
 
     context.user_data.pop("pending_questions", None)
+    context.user_data.pop("pending_topic", None)
 
-    if sent > 0:
-        completion_msg = (
-            "🎉 Quiz processing completed!\n\n"
-            f"Total Questions Sent to {target_display}: {sent}\n"
-            f"Timer per Question: {seconds}s\n\n"
-            "Best of luck for Bihar CHO preparation! 📚"
-        )
-    else:
-        completion_msg = (
-            f"⚠️ Questions channel me send nahi ho sake!\n\n"
-            f"Target: {target_display}\n"
-            f"Reason: {fail_reason}\n\n"
-            "Kripya check karein ki bot channel me admin hai ya nahi."
+    # 2. Leaderboard Generation
+    leaderboard_text = ""
+    if USER_SCORES:
+        # Rank by most correct answers, then least time taken
+        sorted_users = sorted(
+            USER_SCORES.values(),
+            key=lambda u: (-u["correct"], u["total_time"])
         )
 
+        ranks_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        rows = []
+        for i, u in enumerate(sorted_users[:10]):
+            badge = ranks_emojis[i] if i < len(ranks_emojis) else f"#{i+1}"
+            rows.append(
+                f"{badge} **{u['name']}**\n"
+                f"   └ Score: `{u['correct']}/{u['attempted']}` | Time: `{u['total_time']:.1f}s`"
+            )
+
+        leaderboard_text = (
+            "\n\n🏆 **LEADERBOARD / TOPPERS** 🏆\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n".join(rows) +
+            "\n━━━━━━━━━━━━━━━━━━━━\n"
+            "👏 Shandar performance! Keep it up!"
+        )
+
+    closing_message = (
+        "🏁 **QUIZ CONCLUDED!**\n\n"
+        f"📖 **Topic:** {topic}\n"
+        f"📊 **Total Questions Completed:** {sent}/{total_q}"
+        + leaderboard_text
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_destination,
+            text=closing_message,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.warning("Could not send closing leaderboard: %s", e)
+
+    # Summary report to creator bot chat
     await context.bot.send_message(
         chat_id=reply_chat_id,
-        text=completion_msg
+        text=(
+            "🎉 Quiz processing completed!\n\n"
+            f"Topic: {topic}\n"
+            f"Total Questions Sent to {target_destination}: {sent}\n"
+            f"Timer per Question: {seconds}s\n"
+            f"{'Reason: ' + fail_reason if fail_reason else ''}"
+        )
     )
 
 
@@ -425,6 +467,7 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
 telegram_app.add_handler(CallbackQueryHandler(timer_callback))
+telegram_app.add_handler(PollAnswerHandler(handle_poll_answer))
 
 
 # ================ WEBHOOK HANDLER ================
