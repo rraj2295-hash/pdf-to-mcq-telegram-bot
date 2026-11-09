@@ -48,44 +48,14 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Exactly required active model by API
+MODEL = "gemini-2.0-flash"
+
 telegram_app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
     .build()
 )
-
-
-# ================ AUTO MODEL DETECTOR ================
-
-def get_best_model():
-    """Automatically finds an active model from your Gemini API account."""
-    try:
-        available_models = []
-        for m in client.models.list():
-            model_id = m.name if hasattr(m, "name") else str(m)
-            # Remove 'models/' prefix if present
-            clean_name = model_id.replace("models/", "")
-            available_models.append(clean_name)
-
-        logger.info("Found models in your API account: %s", available_models)
-
-        # Prefer flash models
-        for name in available_models:
-            if "flash" in name.lower() and "8b" not in name.lower():
-                return name
-
-        # Fallback to any gemini model
-        for name in available_models:
-            if "gemini" in name.lower():
-                return name
-
-        if available_models:
-            return available_models[0]
-
-    except Exception as e:
-        logger.warning("Could not auto-list models: %s", e)
-
-    return "gemini-2.0-flash"
 
 
 # ================ START COMMAND ================
@@ -151,15 +121,14 @@ PDF TEXT:
 {pdf_text[:60000]}
 """
 
-    active_model = get_best_model()
-    logger.info("Using active model: %s", active_model)
-
     retry_delays = [5, 10, 20]
 
     for attempt in range(len(retry_delays) + 1):
         try:
+            logger.info("Attempting MCQ generation with %s (Attempt %s)", MODEL, attempt + 1)
+
             response = client.models.generate_content(
-                model=active_model,
+                model=MODEL,
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
@@ -195,7 +164,7 @@ PDF TEXT:
                 time.sleep(delay)
                 continue
 
-            logger.exception("Gemini MCQ generation failed with model %s", active_model)
+            logger.exception("Gemini MCQ generation failed")
             raise
 
     raise RuntimeError("Gemini retry attempts exhausted")
