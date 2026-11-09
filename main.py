@@ -59,6 +59,19 @@ telegram_app = (
 ACTIVE_POLLS = {}
 USER_SCORES = {}
 
+# Session flow control
+QUIZ_STATE = {
+    "is_running": False,
+    "is_paused": False,
+    "should_restart": False,
+    "current_questions": [],
+    "topic": "",
+    "timer_seconds": 30,
+    "target_destination": None,
+    "reply_chat_id": None,
+    "control_message_id": None,
+}
+
 
 # ================ AUTO-DISCOVERY MODEL RESOLVER ================
 
@@ -91,7 +104,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
         "📚 Send a text-based PDF file.\n"
         "PDF bhejne ke baad timer select karein.\n\n"
-        "Bot automated numbering, topic banner aur leaderboard create karega! 🩺"
+        "Features:\n"
+        "• Automatic Question Numbering\n"
+        "• Live Control (Pause / Resume / Restart)\n"
+        "• Candidate-wise Detailed Leaderboard (Sahi, Galat, Time) 🩺"
     )
 
 
@@ -99,8 +115,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "📖 Bihar CHO Quiz Bot Help\n\n"
         "/start - Start the Bot\n"
-        "/help - Instructions\n"
-        "Send a PDF to generate automated quizzes with leaderboards."
+        "/help - Instructions\n\n"
+        "PDF upload karein, quiz start hone par Pause, Resume aur Restart buttons control ke liye milenge."
     )
 
 
@@ -194,24 +210,42 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     poll_info = ACTIVE_POLLS[poll_id]
     correct_id = poll_info["correct_option_id"]
     start_time = poll_info["timestamp"]
-    elapsed = max(1.0, round(time.time() - start_time, 1))
+    elapsed = max(0.5, round(time.time() - start_time, 1))
 
     user_id = user.id
-    user_name = user.full_name or user.username or f"Student_{user_id}"
+    user_name = user.full_name or user.first_name or f"Student_{user_id}"
 
     if user_id not in USER_SCORES:
         USER_SCORES[user_id] = {
             "name": user_name,
             "correct": 0,
+            "wrong": 0,
             "attempted": 0,
             "total_time": 0.0,
         }
 
+    if not answer.option_ids:
+        return
+
     USER_SCORES[user_id]["attempted"] += 1
     USER_SCORES[user_id]["total_time"] += elapsed
 
-    if answer.option_ids and answer.option_ids[0] == correct_id:
+    if answer.option_ids[0] == correct_id:
         USER_SCORES[user_id]["correct"] += 1
+    else:
+        USER_SCORES[user_id]["wrong"] += 1
+
+
+# ================ CONTROL KEYBOARD HELPER ================
+
+def get_control_keyboard(is_paused=False):
+    toggle_btn = (
+        InlineKeyboardButton("▶️ Resume Quiz", callback_data="ctrl_resume")
+        if is_paused
+        else InlineKeyboardButton("⏸️ Pause Quiz", callback_data="ctrl_pause")
+    )
+    restart_btn = InlineKeyboardButton("🔄 Restart Quiz", callback_data="ctrl_restart")
+    return InlineKeyboardMarkup([[toggle_btn, restart_btn]])
 
 
 # ================ PDF HANDLER ================
@@ -230,7 +264,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await message.reply_text(
         "📥 PDF received!\n"
-        "⏳ Reading PDF, determining Topic and creating MCQs...\n"
+        "⏳ Reading PDF, determining Topic and creating MCQs with Gemini AI...\n"
         "Please wait..."
     )
 
@@ -289,176 +323,331 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(temp_path)
 
 
-# ================ TIMER CALLBACK & DISPATCHER ================
+# ================ QUIZ RUNNER ENGINE ================
 
-async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ACTIVE_POLLS, USER_SCORES
+async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions, seconds):
+    global ACTIVE_POLLS, USER_SCORES, QUIZ_STATE
+
+    while True:
+        # Reset session values
+        QUIZ_STATE["is_running"] = True
+        QUIZ_STATE["is_paused"] = False
+        QUIZ_STATE["should_restart"] = False
+        ACTIVE_POLLS = {}
+        USER_SCORES = {}
+
+        total_q = len(questions)
+
+        # 1. Topic Announcement
+        intro_banner = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🎯 **BIHAR CHO DAILY QUIZ TEST** 🩺\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📖 **Topic:** {topic}\n"
+            f"❓ **Total Questions:** {total_q}\n"
+            f"⏱️ **Time per Question:** {seconds} Seconds\n\n"
+            "👉 *Answers select karein. End me Detailed Toppers Leaderboard aayega!*"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=target_destination,
+                text=intro_banner,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Intro banner send failed: %s", e)
+
+        await asyncio.sleep(2)
+
+        sent = 0
+        keys = ["A", "B", "C", "D"]
+        is_public_channel = str(target_destination).startswith("@")
+        is_anonymous_mode = True if is_public_channel else False
+
+        restarted = False
+
+        for idx, q in enumerate(questions, start=1):
+            # Check Restart command
+            if QUIZ_STATE["should_restart"]:
+                restarted = True
+                await bot.send_message(
+                    chat_id=target_destination,
+                    text="🔄 **Quiz Restart ho rahi hai... Question 1 se dobara shuru kiya ja raha hai.**",
+                    parse_mode="Markdown"
+                )
+                await asyncio.sleep(2)
+                break
+
+            # Check Pause command
+            while QUIZ_STATE["is_paused"]:
+                if QUIZ_STATE["should_restart"]:
+                    break
+                await asyncio.sleep(1)
+
+            if QUIZ_STATE["should_restart"]:
+                restarted = True
+                await bot.send_message(
+                    chat_id=target_destination,
+                    text="🔄 **Quiz Restart ho rahi hai... Question 1 se dobara shuru kiya ja raha hai.**",
+                    parse_mode="Markdown"
+                )
+                await asyncio.sleep(2)
+                break
+
+            if not isinstance(q, dict):
+                continue
+
+            options = q.get("options", {})
+            if not isinstance(options, dict):
+                continue
+
+            clean_q = str(q.get("question", "")).strip()
+            answer = str(q.get("answer", "")).strip().upper()
+
+            if (
+                not clean_q
+                or len(clean_q) > 280
+                or answer not in keys
+                or any(not isinstance(options.get(k), str) or not options[k].strip() or len(options[k]) > 100 for k in keys)
+            ):
+                continue
+
+            formatted_question = f"Q{idx}. {clean_q}"
+            explanation = str(q.get("rationale", "")).strip()[:200]
+            correct_opt_id = keys.index(answer)
+
+            try:
+                poll_msg = await bot.send_poll(
+                    chat_id=target_destination,
+                    question=formatted_question,
+                    options=[options[k].strip() for k in keys],
+                    type="quiz",
+                    correct_option_id=correct_opt_id,
+                    explanation=explanation or None,
+                    is_anonymous=is_anonymous_mode,
+                    open_period=seconds,
+                )
+
+                if poll_msg.poll:
+                    ACTIVE_POLLS[poll_msg.poll.id] = {
+                        "correct_option_id": correct_opt_id,
+                        "timestamp": time.time(),
+                    }
+
+                sent += 1
+
+                # Update live control message in creator DM
+                if QUIZ_STATE["control_message_id"]:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=reply_chat_id,
+                            message_id=QUIZ_STATE["control_message_id"],
+                            text=(
+                                f"🎮 **Live Quiz Control Panel**\n\n"
+                                f"📖 Topic: `{topic}`\n"
+                                f"📊 Progress: `Question {idx}/{total_q}`\n"
+                                f"⏱️ Status: `{'PAUSED' if QUIZ_STATE['is_paused'] else 'RUNNING'}`"
+                            ),
+                            reply_markup=get_control_keyboard(QUIZ_STATE["is_paused"]),
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+                # Delay per question
+                step_sleep = seconds + 2
+                for _ in range(step_sleep):
+                    if QUIZ_STATE["should_restart"]:
+                        break
+                    while QUIZ_STATE["is_paused"]:
+                        if QUIZ_STATE["should_restart"]:
+                            break
+                        await asyncio.sleep(1)
+                    await asyncio.sleep(1)
+
+            except Exception as poll_err:
+                logger.exception("Poll failed: %s", poll_err)
+                break
+
+        if restarted:
+            continue
+
+        # End of questions: Give grace time for last poll votes
+        await asyncio.sleep(3)
+
+        # 2. Detailed Leaderboard Generation
+        if USER_SCORES:
+            sorted_users = sorted(
+                USER_SCORES.values(),
+                key=lambda u: (-u["correct"], u["total_time"])
+            )
+
+            ranks_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+            rows = []
+            for i, u in enumerate(sorted_users[:10]):
+                badge = ranks_emojis[i] if i < len(ranks_emojis) else f"#{i+1}"
+                rows.append(
+                    f"{badge} **{u['name']}**\n"
+                    f"   ├ ✅ Sahi: `{u['correct']}` | ❌ Galat: `{u['wrong']}`\n"
+                    f"   ├ 📝 Total Attempt: `{u['attempted']}/{total_q}`\n"
+                    f"   └ ⏱️ Total Time: `{u['total_time']:.1f}s`"
+                )
+
+            leaderboard_section = (
+                "\n\n🏆 **TOPPERS LEADERBOARD** 🏆\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                + "\n\n".join(rows) +
+                "\n━━━━━━━━━━━━━━━━━━━━\n"
+                "👏 Bahut khoob! Congratulations Toppers!"
+            )
+        else:
+            leaderboard_section = (
+                "\n\n🏆 **TOPPERS LEADERBOARD** 🏆\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Kisi bhi student ne time limit ke andar attempt nahi kiya."
+            )
+
+        closing_message = (
+            "🏁 **QUIZ CONCLUDED!**\n\n"
+            f"📖 **Topic:** {topic}\n"
+            f"📊 **Total Questions Completed:** {sent}/{total_q}"
+            + leaderboard_section
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=target_destination,
+                text=closing_message,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Could not send closing leaderboard: %s", e)
+
+        # Cleanup control panel in private chat
+        if QUIZ_STATE["control_message_id"]:
+            try:
+                await bot.edit_message_text(
+                    chat_id=reply_chat_id,
+                    message_id=QUIZ_STATE["control_message_id"],
+                    text=(
+                        "🎉 **Quiz Process Completed!**\n\n"
+                        f"Topic: {topic}\n"
+                        f"Questions Sent: {sent}/{total_q}\n"
+                        f"Target Group: {target_destination}\n"
+                        f"Active Participants: {len(USER_SCORES)}"
+                    )
+                )
+            except Exception:
+                pass
+
+        QUIZ_STATE["is_running"] = False
+        break
+
+
+# ================ CALLBACK HANDLER (TIMER & CONTROLS) ================
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global QUIZ_STATE
     query = update.callback_query
     await query.answer()
 
     data = query.data
-    if not data.startswith("timer_"):
-        return
 
-    seconds = int(data.split("_")[1])
-    questions = context.user_data.get("pending_questions", [])
-    topic = context.user_data.get("pending_topic", "Bihar CHO Nursing Mock Test")
-    reply_chat_id = context.user_data.get("reply_chat_id", query.message.chat_id)
+    # 1. Timer Selection
+    if data.startswith("timer_"):
+        seconds = int(data.split("_")[1])
+        questions = context.user_data.get("pending_questions", [])
+        topic = context.user_data.get("pending_topic", "Bihar CHO Nursing Mock Test")
+        reply_chat_id = context.user_data.get("reply_chat_id", query.message.chat_id)
 
-    if not questions:
-        await query.edit_message_text("❌ Questions expire ho chuke hain. Kripya PDF dobara bhejein.")
-        return
+        if not questions:
+            await query.edit_message_text("❌ Questions expire ho gaye hain. Kripya PDF dobara bhejein.")
+            return
 
-    target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
-    total_q = len(questions)
+        target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
 
-    # Reset scoreboards for this test session
-    ACTIVE_POLLS = {}
-    USER_SCORES = {}
+        QUIZ_STATE["current_questions"] = questions
+        QUIZ_STATE["topic"] = topic
+        QUIZ_STATE["timer_seconds"] = seconds
+        QUIZ_STATE["target_destination"] = target_destination
+        QUIZ_STATE["reply_chat_id"] = reply_chat_id
 
-    await query.edit_message_text(
-        f"⏳ Timer: {seconds}s per question.\n"
-        f"Target: {target_destination}\n"
-        "Sending announcement and initiating Quiz..."
-    )
-
-    # 1. Starting Announcement Message
-    intro_banner = (
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 **BIHAR CHO DAILY QUIZ TEST** 🩺\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📖 **Topic:** {topic}\n"
-        f"❓ **Total Questions:** {total_q}\n"
-        f"⏱️ **Time per Question:** {seconds} Seconds\n\n"
-        "👉 *Har question ka countdown timer chalu rahega. Best of luck!*"
-    )
-
-    try:
-        await context.bot.send_message(
-            chat_id=target_destination,
-            text=intro_banner,
+        ctrl_msg = await query.edit_message_text(
+            f"🎮 **Live Quiz Control Panel**\n\n"
+            f"📖 Topic: `{topic}`\n"
+            f"📊 Progress: `Starting...`\n"
+            f"⏱️ Status: `RUNNING` ({seconds}s per Q)",
+            reply_markup=get_control_keyboard(is_paused=False),
             parse_mode="Markdown"
         )
-    except Exception as e:
-        logger.warning("Intro banner send failed: %s", e)
+        QUIZ_STATE["control_message_id"] = ctrl_msg.message_id
 
-    await asyncio.sleep(2)
-
-    sent = 0
-    fail_reason = ""
-    keys = ["A", "B", "C", "D"]
-
-    # Channel chats strictly require is_anonymous=True, groups allow interactive false
-    is_channel = str(target_destination).startswith("-100") or str(target_destination).startswith("@")
-    is_anonymous_mode = True if is_channel else False
-
-    for idx, q in enumerate(questions, start=1):
-        if not isinstance(q, dict):
-            continue
-
-        options = q.get("options", {})
-        if not isinstance(options, dict):
-            continue
-
-        clean_q = str(q.get("question", "")).strip()
-        answer = str(q.get("answer", "")).strip().upper()
-
-        if (
-            not clean_q
-            or len(clean_q) > 280
-            or answer not in keys
-            or any(not isinstance(options.get(k), str) or not options[k].strip() or len(options[k]) > 100 for k in keys)
-        ):
-            continue
-
-        # Add question numbering prefix: Q1., Q2., etc.
-        formatted_question = f"Q{idx}. {clean_q}"
-        explanation = str(q.get("rationale", "")).strip()[:200]
-        correct_opt_id = keys.index(answer)
-
-        try:
-            poll_msg = await context.bot.send_poll(
-                chat_id=target_destination,
-                question=formatted_question,
-                options=[options[k].strip() for k in keys],
-                type="quiz",
-                correct_option_id=correct_opt_id,
-                explanation=explanation or None,
-                is_anonymous=is_anonymous_mode,
-                open_period=seconds,
+        # Launch background quiz flow
+        asyncio.create_task(
+            run_quiz_flow(
+                bot=context.bot,
+                target_destination=target_destination,
+                reply_chat_id=reply_chat_id,
+                topic=topic,
+                questions=questions,
+                seconds=seconds
             )
-
-            # Store poll for real-time answer tracking
-            if poll_msg.poll:
-                ACTIVE_POLLS[poll_msg.poll.id] = {
-                    "correct_option_id": correct_opt_id,
-                    "timestamp": time.time(),
-                }
-
-            sent += 1
-            await asyncio.sleep(seconds + 2)
-
-        except Exception as poll_err:
-            fail_reason = str(poll_err)
-            logger.exception("Poll failed: %s", poll_err)
-            break
-
-    context.user_data.pop("pending_questions", None)
-    context.user_data.pop("pending_topic", None)
-
-    # 2. Leaderboard Generation
-    leaderboard_text = ""
-    if USER_SCORES:
-        # Rank by most correct answers, then least time taken
-        sorted_users = sorted(
-            USER_SCORES.values(),
-            key=lambda u: (-u["correct"], u["total_time"])
         )
+        return
 
-        ranks_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        rows = []
-        for i, u in enumerate(sorted_users[:10]):
-            badge = ranks_emojis[i] if i < len(ranks_emojis) else f"#{i+1}"
-            rows.append(
-                f"{badge} **{u['name']}**\n"
-                f"   └ Score: `{u['correct']}/{u['attempted']}` | Time: `{u['total_time']:.1f}s`"
+    # 2. Pause Quiz
+    if data == "ctrl_pause":
+        if QUIZ_STATE["is_running"]:
+            QUIZ_STATE["is_paused"] = True
+            await query.edit_message_text(
+                f"🎮 **Live Quiz Control Panel**\n\n"
+                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"⏱️ Status: `PAUSED ⏸️`\n"
+                "Quiz pause ho chuki hai. Agla question nahi aayega.",
+                reply_markup=get_control_keyboard(is_paused=True),
+                parse_mode="Markdown"
             )
+            # Group announcement
+            await context.bot.send_message(
+                chat_id=QUIZ_STATE["target_destination"],
+                text="⏸️ **Quiz ko Admin dwara temporary Pause kar diya gaya hai.**"
+            )
+        return
 
-        leaderboard_text = (
-            "\n\n🏆 **LEADERBOARD / TOPPERS** 🏆\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n".join(rows) +
-            "\n━━━━━━━━━━━━━━━━━━━━\n"
-            "👏 Shandar performance! Keep it up!"
-        )
+    # 3. Resume Quiz
+    if data == "ctrl_resume":
+        if QUIZ_STATE["is_running"]:
+            QUIZ_STATE["is_paused"] = False
+            await query.edit_message_text(
+                f"🎮 **Live Quiz Control Panel**\n\n"
+                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"⏱️ Status: `RESUMED ▶️`\n"
+                "Quiz dubara shuru kar di gayi hai.",
+                reply_markup=get_control_keyboard(is_paused=False),
+                parse_mode="Markdown"
+            )
+            # Group announcement
+            await context.bot.send_message(
+                chat_id=QUIZ_STATE["target_destination"],
+                text="▶️ **Quiz Resume ho chuki hai. Aage ke questions continue ho rahe hain!**"
+            )
+        return
 
-    closing_message = (
-        "🏁 **QUIZ CONCLUDED!**\n\n"
-        f"📖 **Topic:** {topic}\n"
-        f"📊 **Total Questions Completed:** {sent}/{total_q}"
-        + leaderboard_text
-    )
-
-    try:
-        await context.bot.send_message(
-            chat_id=target_destination,
-            text=closing_message,
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.warning("Could not send closing leaderboard: %s", e)
-
-    # Summary report to creator bot chat
-    await context.bot.send_message(
-        chat_id=reply_chat_id,
-        text=(
-            "🎉 Quiz processing completed!\n\n"
-            f"Topic: {topic}\n"
-            f"Total Questions Sent to {target_destination}: {sent}\n"
-            f"Timer per Question: {seconds}s\n"
-            f"{'Reason: ' + fail_reason if fail_reason else ''}"
-        )
-    )
+    # 4. Restart Quiz
+    if data == "ctrl_restart":
+        if QUIZ_STATE["is_running"]:
+            QUIZ_STATE["is_paused"] = False
+            QUIZ_STATE["should_restart"] = True
+            await query.edit_message_text(
+                f"🎮 **Live Quiz Control Panel**\n\n"
+                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"⏱️ Status: `RESTARTING 🔄`\n"
+                "Quiz ko Question 1 se dobara start kiya ja raha hai...",
+                reply_markup=get_control_keyboard(is_paused=False),
+                parse_mode="Markdown"
+            )
+        return
 
 
 # ================ REGISTER HANDLERS ================
@@ -466,7 +655,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
-telegram_app.add_handler(CallbackQueryHandler(timer_callback))
+telegram_app.add_handler(CallbackQueryHandler(callback_router))
 telegram_app.add_handler(PollAnswerHandler(handle_poll_answer))
 
 
@@ -509,7 +698,7 @@ async def on_startup(app):
     await telegram_app.bot.set_webhook(
         url=webhook_url,
         secret_token=WEBHOOK_SECRET,
-        allowed_updates=Update.ALL_TYPES,
+        allowed_updates=["message", "callback_query", "poll_answer", "poll"],
         drop_pending_updates=False,
     )
     logger.info("Telegram webhook configured successfully")
