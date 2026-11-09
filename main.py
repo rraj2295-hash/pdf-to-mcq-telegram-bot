@@ -48,8 +48,12 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Exactly required active model by API
-MODEL = "gemini-2.0-flash"
+# Models to attempt in priority order
+MODELS_TO_TRY = [
+    "gemini-3.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
 
 telegram_app = (
     ApplicationBuilder()
@@ -121,53 +125,60 @@ PDF TEXT:
 {pdf_text[:60000]}
 """
 
-    retry_delays = [5, 10, 20]
+    last_error = None
 
-    for attempt in range(len(retry_delays) + 1):
-        try:
-            logger.info("Attempting MCQ generation with %s (Attempt %s)", MODEL, attempt + 1)
+    for model_name in MODELS_TO_TRY:
+        retry_delays = [5, 10]
+        logger.info("Attempting MCQ generation with model: %s", model_name)
 
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.2,
-                },
-            )
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "temperature": 0.2,
+                    },
+                )
 
-            if not response.text:
-                raise ValueError("Gemini returned empty response")
+                if not response.text:
+                    raise ValueError("Gemini returned empty response")
 
-            data = json.loads(response.text)
-            if not isinstance(data, dict):
-                raise ValueError("Invalid JSON response")
+                data = json.loads(response.text)
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid JSON response")
 
-            questions = data.get("questions", [])
-            if not isinstance(questions, list):
-                raise ValueError("Invalid questions list")
+                questions = data.get("questions", [])
+                if not isinstance(questions, list):
+                    raise ValueError("Invalid questions list")
 
-            logger.info("Generated %s questions successfully", len(questions))
-            return questions[:30]
+                logger.info("Successfully generated %s questions with %s", len(questions), model_name)
+                return questions[:30]
 
-        except Exception as exc:
-            error_text = str(exc).upper()
+            except Exception as exc:
+                last_error = exc
+                error_text = str(exc).upper()
 
-            temporary_errors = (
-                "503", "429", "500", "502", "504",
-                "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"
-            )
+                if "404" in error_text or "NOT_FOUND" in error_text:
+                    logger.warning("Model %s returned 404, falling back to next model...", model_name)
+                    break
 
-            if any(err in error_text for err in temporary_errors) and attempt < len(retry_delays):
-                delay = retry_delays[attempt]
-                logger.warning("Temporary Gemini error. Retrying in %ss: %s", delay, exc)
-                time.sleep(delay)
-                continue
+                temporary_errors = (
+                    "503", "429", "500", "502", "504",
+                    "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"
+                )
 
-            logger.exception("Gemini MCQ generation failed")
-            raise
+                if any(err in error_text for err in temporary_errors) and attempt < len(retry_delays):
+                    delay = retry_delays[attempt]
+                    logger.warning("Temporary Gemini error. Retrying in %ss: %s", delay, exc)
+                    time.sleep(delay)
+                    continue
 
-    raise RuntimeError("Gemini retry attempts exhausted")
+                break
+
+    logger.exception("All Gemini models failed")
+    raise last_error if last_error else RuntimeError("Gemini MCQ generation failed")
 
 
 # ================ PDF HANDLER ================
