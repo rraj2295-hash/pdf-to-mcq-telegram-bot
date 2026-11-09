@@ -48,8 +48,8 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Active Gemini Model
-MODEL = "gemini-2.0-flash"
+# Gemini Model
+MODEL = "gemini-2.5-flash"
 
 telegram_app = (
     ApplicationBuilder()
@@ -370,7 +370,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             sent += 1
 
-            # Timer ke baad agle question ke liye thoda wait
+            # Timer ke baad agle question ke liye gap
             await asyncio.sleep(seconds + 2)
 
         except Exception:
