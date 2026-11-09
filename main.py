@@ -34,8 +34,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
-# Target Channel / Group (e.g. @CHO26_27 ya -100xxxxxxxxxx)
-TARGET_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID")
+# Clean target channel id (removes any hidden space or newline)
+raw_channel = os.environ.get("TARGET_CHANNEL_ID", "")
+TARGET_CHANNEL_ID = raw_channel.strip() if raw_channel else None
 
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
@@ -62,27 +63,17 @@ def get_available_models():
     discovered = []
     try:
         for m in client.models.list():
-            # Extract clean model name
             m_name = getattr(m, "name", str(m))
             clean_name = m_name.replace("models/", "")
-            
-            # Check supported actions if metadata is available
-            methods = getattr(m, "supported_generation_methods", None) or getattr(m, "supported_actions", None)
-            if methods:
-                if any("generateContent" in str(action) for action in methods):
-                    discovered.append(clean_name)
-            else:
-                discovered.append(clean_name)
+            discovered.append(clean_name)
     except Exception as exc:
         logger.warning("Auto model discovery via list() failed: %s", exc)
 
-    # Sort discovered to prioritize flash versions
     flash_models = [m for m in discovered if "flash" in m.lower() and "8b" not in m.lower()]
     other_gemini = [m for m in discovered if "gemini" in m.lower() and m not in flash_models]
     
     final_candidates = flash_models + other_gemini + discovered
     
-    # Static fallbacks just in case list API is restricted
     fallbacks = ["gemini-3.0-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     for fb in fallbacks:
         if fb not in final_candidates:
@@ -160,7 +151,6 @@ PDF TEXT:
     last_error = None
 
     for model_name in candidate_models:
-        logger.info("Testing candidate model: %s", model_name)
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -190,11 +180,9 @@ PDF TEXT:
             err_msg = str(exc).upper()
             logger.warning("Model candidate %s failed: %s", model_name, exc)
 
-            # If 404 or NOT_FOUND, immediately try next candidate model
             if "404" in err_msg or "NOT_FOUND" in err_msg:
                 continue
 
-            # If temporary rate limit / server error, retry once after short delay
             if any(code in err_msg for code in ("429", "500", "503", "504", "RESOURCE_EXHAUSTED")):
                 time.sleep(3)
                 try:
@@ -351,15 +339,17 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Questions expire ho chuke hain. Kripya PDF dobara bhejein.")
         return
 
-    destination_chat_id = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
-    target_name = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else "Chat"
+    # Clean target chat
+    target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
+    target_display = target_destination
 
     await query.edit_message_text(
         f"⏳ Timer set to {seconds} seconds.\n"
-        f"Channel ({target_name}) me questions bhejna start ho raha hai..."
+        f"Channel ({target_display}) me questions bhejna start ho raha hai..."
     )
 
     sent = 0
+    fail_reason = ""
     keys = ["A", "B", "C", "D"]
 
     for q in questions:
@@ -390,7 +380,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await context.bot.send_poll(
-                chat_id=destination_chat_id,
+                chat_id=target_destination,
                 question=question,
                 options=[options[k].strip() for k in keys],
                 type="quiz",
@@ -400,22 +390,36 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 open_period=seconds,
             )
             sent += 1
-
             await asyncio.sleep(seconds + 2)
 
-        except Exception:
-            logger.exception("Failed to send an individual quiz question")
+        except Exception as poll_err:
+            fail_reason = str(poll_err)
+            logger.exception("Failed to send poll to destination %s: %s", target_destination, poll_err)
+            # Agar chat not found ya permission error hai to aage loop na chalayein
+            break
 
     context.user_data.pop("pending_questions", None)
 
-    await context.bot.send_message(
-        chat_id=reply_chat_id,
-        text=(
+    if sent > 0:
+        completion_msg = (
             "🎉 Quiz processing completed!\n\n"
-            f"Total Questions Sent to {target_name}: {sent}\n"
+            f"Total Questions Sent to {target_display}: {sent}\n"
             f"Timer per Question: {seconds}s\n\n"
             "Best of luck for Bihar CHO preparation! 📚"
         )
+    else:
+        completion_msg = (
+            f"⚠️ Questions channel me send nahi ho sake!\n\n"
+            f"Target: {target_display}\n"
+            f"Reason: {fail_reason}\n\n"
+            "Kripya check karein ki:\n"
+            "1. Bot channel me Admin hai ya nahi.\n"
+            "2. Bot ke paas 'Post Messages' permission hai ya nahi."
+        )
+
+    await context.bot.send_message(
+        chat_id=reply_chat_id,
+        text=completion_msg
     )
 
 
