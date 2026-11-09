@@ -48,12 +48,8 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# List of models to try in order if one returns 404
-AVAILABLE_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-]
+# Primary & Fallback Models
+MODELS_TO_TRY = ["gemini-2.0-flash", "gemini-1.5-flash"]
 
 telegram_app = (
     ApplicationBuilder()
@@ -68,7 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
         "📚 Send a text-based PDF file.\n\n"
-        "PDF bhejne ke baad bot aapse timer select karne bolega.\n\n"
+        "PDF bhejne ke baad bot timer select karne bolega.\n\n"
         "Best of luck for Bihar CHO preparation! 🩺"
     )
 
@@ -127,60 +123,47 @@ PDF TEXT:
 
     last_error = None
 
-    # Try each available model if 404 occurs
-    for current_model in AVAILABLE_MODELS:
-        retry_delays = [5, 10]
-        logger.info("Attempting MCQ generation using model: %s", current_model)
+    for model_name in MODELS_TO_TRY:
+        try:
+            logger.info("Generating MCQs using model: %s", model_name)
 
-        for attempt in range(len(retry_delays) + 1):
-            try:
-                response = client.models.generate_content(
-                    model=current_model,
-                    contents=prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "temperature": 0.2,
-                    },
-                )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.2,
+                },
+            )
 
-                if not response.text:
-                    raise ValueError("Gemini returned empty response")
+            if not response.text:
+                raise ValueError("Gemini returned empty response")
 
-                data = json.loads(response.text)
-                if not isinstance(data, dict):
-                    raise ValueError("Invalid JSON response")
+            data = json.loads(response.text)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid JSON response")
 
-                questions = data.get("questions", [])
-                if not isinstance(questions, list):
-                    raise ValueError("Invalid questions list")
+            questions = data.get("questions", [])
+            if not isinstance(questions, list):
+                raise ValueError("Invalid questions list")
 
-                logger.info("MCQ generation succeeded with model: %s", current_model)
-                return questions[:30]
+            logger.info("Successfully generated %s questions with %s", len(questions), model_name)
+            return questions[:30]
 
-            except Exception as exc:
-                last_error = exc
-                error_text = str(exc).upper()
+        except Exception as exc:
+            last_error = exc
+            error_str = str(exc).upper()
+            logger.warning("Model %s failed: %s", model_name, exc)
 
-                # If model is 404 / not found, break and try next model
-                if "404" in error_text or "NOT_FOUND" in error_text:
-                    logger.warning("Model %s returned 404, switching to next model...", current_model)
-                    break
+            if "404" in error_str or "NOT_FOUND" in error_str:
+                continue
 
-                temporary_errors = (
-                    "503", "429", "500", "502", "504",
-                    "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"
-                )
-
-                if any(err in error_text for err in temporary_errors) and attempt < len(retry_delays):
-                    delay = retry_delays[attempt]
-                    logger.warning("Temporary Gemini error. Retrying in %ss: %s", delay, exc)
-                    time.sleep(delay)
-                    continue
-
-                break
+            # Temporary retry
+            time.sleep(3)
+            continue
 
     logger.exception("All Gemini models failed")
-    raise last_error if last_error else RuntimeError("Gemini MCQ generation failed")
+    raise last_error if last_error else RuntimeError("Gemini generation failed")
 
 
 # ================ PDF HANDLER ================
