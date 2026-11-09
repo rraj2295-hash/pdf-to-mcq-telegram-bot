@@ -1,4 +1,3 @@
-
 import os
 import json
 import asyncio
@@ -9,11 +8,12 @@ import re
 import time
 
 from aiohttp import web
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -34,6 +34,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
+# Target Channel / Group (e.g. @CHO26_27 ya -100xxxxxxxxxx)
+TARGET_CHANNEL_ID = os.environ.get("TARGET_CHANNEL_ID")
+
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
 
@@ -45,7 +48,7 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL = "gemini-3.8-flash"
+MODEL = "gemini-2.5-flash"
 
 telegram_app = (
     ApplicationBuilder()
@@ -57,12 +60,10 @@ telegram_app = (
 # ================ START COMMAND ================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     await update.effective_message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
         "📚 Send a text-based PDF file.\n\n"
-        "I will read your PDF and create up to 30 "
-        "interactive MCQ Quiz questions.\n\n"
+        "PDF bhejne ke baad bot aapse timer select karne bolega.\n\n"
         "Best of luck for Bihar CHO preparation! 🩺"
     )
 
@@ -70,7 +71,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================ HELP COMMAND ================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     await update.effective_message.reply_text(
         "📖 Bihar CHO Quiz Bot Help\n\n"
         "/start - Start the Bot\n"
@@ -82,7 +82,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================ GEMINI MCQ GENERATION ================
 
 def generate_questions(pdf_text):
-
     prompt = f"""
 You are an expert nursing examination question creator.
 
@@ -121,17 +120,11 @@ PDF TEXT:
 {pdf_text[:60000]}
 """
 
-    # Retry delays: 5, 10 and 20 seconds
     retry_delays = [5, 10, 20]
 
     for attempt in range(len(retry_delays) + 1):
-
         try:
-
-            logger.info(
-                "Gemini request attempt %s",
-                attempt + 1
-            )
+            logger.info("Gemini request attempt %s", attempt + 1)
 
             response = client.models.generate_content(
                 model=MODEL,
@@ -158,7 +151,6 @@ PDF TEXT:
             return questions[:30]
 
         except Exception as exc:
-
             error_text = str(exc).upper()
 
             temporary_errors = (
@@ -179,16 +171,12 @@ PDF TEXT:
             )
 
             if should_retry and attempt < len(retry_delays):
-
                 delay = retry_delays[attempt]
-
                 logger.warning(
-                    "Temporary Gemini error. "
-                    "Retrying in %s seconds. Error: %s",
+                    "Temporary Gemini error. Retrying in %s seconds. Error: %s",
                     delay,
                     exc,
                 )
-
                 time.sleep(delay)
                 continue
 
@@ -201,7 +189,6 @@ PDF TEXT:
 # ================ PDF HANDLER ================
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     message = update.effective_message
     document = message.document
 
@@ -210,34 +197,26 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         or not document.file_name
         or not document.file_name.lower().endswith(".pdf")
     ):
-
         await message.reply_text("Please send a PDF file.")
         return
 
     if document.file_size and document.file_size > 20 * 1024 * 1024:
-
         await message.reply_text("PDF must be smaller than 20 MB.")
         return
 
-    await message.reply_text(
+    status_msg = await message.reply_text(
         "📥 PDF received!\n"
-        "⏳ Reading PDF and creating MCQs.\n"
+        "⏳ Reading PDF and creating MCQs with Gemini AI...\n"
         "Please wait..."
     )
 
     temp_path = None
 
     try:
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".pdf",
-            delete=False
-        ) as temp:
-
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
             temp_path = temp.name
 
         pdf_file = await context.bot.get_file(document.file_id)
-
         await pdf_file.download_to_drive(temp_path)
 
         reader = PdfReader(temp_path)
@@ -251,17 +230,11 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if len(pdf_text.strip()) < 100:
-
-            await message.reply_text(
+            await status_msg.edit_text(
                 "❌ PDF text could not be read.\n"
                 "Please send a text-based PDF, not a scanned PDF."
             )
             return
-
-        await message.reply_text(
-            "🤖 PDF text extracted successfully.\n"
-            "Creating MCQs with Gemini AI..."
-        )
 
         questions = await asyncio.to_thread(
             generate_questions,
@@ -269,77 +242,36 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not questions:
-
-            await message.reply_text(
+            await status_msg.edit_text(
                 "No MCQs could be generated from this PDF."
             )
             return
 
-        sent = 0
-        keys = ["A", "B", "C", "D"]
+        # Store generated questions temporarily for this user
+        context.user_data["pending_questions"] = questions
+        context.user_data["reply_chat_id"] = message.chat_id
 
-        for q in questions:
+        # Timer selection buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("⏱️ 15s", callback_data="timer_15"),
+                InlineKeyboardButton("⏱️ 30s", callback_data="timer_30"),
+            ],
+            [
+                InlineKeyboardButton("⏱️ 45s", callback_data="timer_45"),
+                InlineKeyboardButton("⏱️ 60s", callback_data="timer_60"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if not isinstance(q, dict):
-                continue
-
-            options = q.get("options", {})
-
-            if not isinstance(options, dict):
-                continue
-
-            question = str(q.get("question", "")).strip()
-            answer = str(q.get("answer", "")).strip().upper()
-
-            if (
-                not question
-                or len(question) > 300
-                or answer not in keys
-                or any(
-                    not isinstance(options.get(k), str)
-                    or not options[k].strip()
-                    or len(options[k]) > 100
-                    for k in keys
-                )
-            ):
-                continue
-
-            explanation = str(
-                q.get("rationale", "")
-            ).strip()[:200]
-
-            try:
-
-                await context.bot.send_poll(
-                    chat_id=message.chat_id,
-                    question=question,
-                    options=[options[k].strip() for k in keys],
-                    type="quiz",
-                    correct_option_id=keys.index(answer),
-                    explanation=explanation or None,
-                    is_anonymous=False,
-                )
-
-                sent += 1
-
-                await asyncio.sleep(1)
-
-            except Exception:
-
-                logger.exception(
-                    "Failed to send an individual quiz question"
-                )
-
-        await message.reply_text(
-            "🎉 Quiz processing completed!\n\n"
-            f"Total Questions Sent: {sent}\n\n"
-            "Best of luck for Bihar CHO preparation! 📚"
+        await status_msg.edit_text(
+            f"✅ {len(questions)} Questions generate ho gaye hain!\n\n"
+            "⏱️ Har question ke liye **Timer kitne seconds** ka rakhna hai? Select karein:",
+            reply_markup=reply_markup
         )
 
     except Exception as exc:
-
         logger.exception("PDF processing failed")
-
         error_text = str(exc).upper()
 
         if any(
@@ -347,94 +279,146 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for code in ("503", "429", "500", "502", "504",
                          "UNAVAILABLE", "RESOURCE_EXHAUSTED")
         ):
-
             user_message = (
                 "⚠️ Gemini AI is temporarily busy.\n\n"
                 "Please try sending your PDF again after a few minutes."
             )
-
         elif "API KEY" in error_text or "API_KEY" in error_text:
-
             user_message = (
                 "❌ Gemini API Key problem.\n"
                 "Please check GEMINI_API_KEY in Render Environment."
             )
-
         else:
-
             user_message = (
                 "❌ PDF processing failed.\n\n"
                 "Please check the PDF and try again."
             )
 
-        await message.reply_text(user_message)
+        await status_msg.edit_text(user_message)
 
     finally:
-
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
+# ================ TIMER BUTTON CALLBACK HANDLER ================
+
+async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("timer_"):
+        return
+
+    seconds = int(data.split("_")[1])
+    questions = context.user_data.get("pending_questions", [])
+    reply_chat_id = context.user_data.get("reply_chat_id", query.message.chat_id)
+
+    if not questions:
+        await query.edit_message_text("❌ Questions expire ho chuke hain. Kripya PDF dobara bhejein.")
+        return
+
+    destination_chat_id = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
+    target_name = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else "Chat"
+
+    await query.edit_message_text(
+        f"⏳ Timer set to {seconds} seconds.\n"
+        f"Channel ({target_name}) me questions bhejna start ho raha hai..."
+    )
+
+    sent = 0
+    keys = ["A", "B", "C", "D"]
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+
+        options = q.get("options", {})
+        if not isinstance(options, dict):
+            continue
+
+        question = str(q.get("question", "")).strip()
+        answer = str(q.get("answer", "")).strip().upper()
+
+        if (
+            not question
+            or len(question) > 300
+            or answer not in keys
+            or any(
+                not isinstance(options.get(k), str)
+                or not options[k].strip()
+                or len(options[k]) > 100
+                for k in keys
+            )
+        ):
+            continue
+
+        explanation = str(q.get("rationale", "")).strip()[:200]
+
+        try:
+            await context.bot.send_poll(
+                chat_id=destination_chat_id,
+                question=question,
+                options=[options[k].strip() for k in keys],
+                type="quiz",
+                correct_option_id=keys.index(answer),
+                explanation=explanation or None,
+                is_anonymous=False,
+                open_period=seconds,
+            )
+            sent += 1
+
+            # Har question ke baad timer + 2 second ka gap taaki quiz smooth chale
+            await asyncio.sleep(seconds + 2)
+
+        except Exception:
+            logger.exception("Failed to send an individual quiz question")
+
+    # Clear memory
+    context.user_data.pop("pending_questions", None)
+
+    await context.bot.send_message(
+        chat_id=reply_chat_id,
+        text=(
+            "🎉 Quiz processing completed!\n\n"
+            f"Total Questions Sent to {target_name}: {sent}\n"
+            f"Timer per Question: {seconds}s\n\n"
+            "Best of luck for Bihar CHO preparation! 📚"
+        )
+    )
+
+
 # ================ REGISTER HANDLERS ================
 
-telegram_app.add_handler(
-    CommandHandler("start", start)
-)
-
-telegram_app.add_handler(
-    CommandHandler("help", help_command)
-)
-
-telegram_app.add_handler(
-    MessageHandler(filters.Document.PDF, handle_pdf)
-)
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+telegram_app.add_handler(CallbackQueryHandler(timer_callback))
 
 
 # ================ WEBHOOK HANDLER ================
 
 async def webhook_handler(request):
+    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
 
-    supplied_secret = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token",
-        ""
-    )
-
-    if not hmac.compare_digest(
-        supplied_secret,
-        WEBHOOK_SECRET
-    ):
-
-        raise web.HTTPForbidden(
-            text="Invalid webhook secret"
-        )
+    if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
+        raise web.HTTPForbidden(text="Invalid webhook secret")
 
     try:
-
         data = await request.json()
-
-        update = Update.de_json(
-            data,
-            telegram_app.bot
-        )
-
+        update = Update.de_json(data, telegram_app.bot)
         await telegram_app.update_queue.put(update)
-
         return web.Response(text="OK")
 
     except Exception:
-
         logger.exception("Webhook update failed")
-
-        return web.Response(
-            status=500,
-            text="Webhook processing error"
-        )
+        return web.Response(status=500, text="Webhook processing error")
 
 
 # ================ HEALTH CHECK ================
 
 async def health(request):
-
     return web.json_response({
         "status": "running",
         "service": "Bihar CHO Quiz Bot"
@@ -444,14 +428,10 @@ async def health(request):
 # ================ STARTUP ================
 
 async def on_startup(app):
-
     await telegram_app.initialize()
-
     await telegram_app.start()
 
-    webhook_url = (
-        RENDER_URL.rstrip("/") + "/webhook"
-    )
+    webhook_url = RENDER_URL.rstrip("/") + "/webhook"
 
     await telegram_app.bot.set_webhook(
         url=webhook_url,
@@ -459,27 +439,20 @@ async def on_startup(app):
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
     )
-
-    logger.info(
-        "Telegram webhook configured successfully"
-    )
+    logger.info("Telegram webhook configured successfully")
 
 
 # ================ CLEANUP ================
 
 async def on_cleanup(app):
-
     await telegram_app.stop()
-
     await telegram_app.shutdown()
-
     logger.info("Telegram Bot stopped safely")
 
 
 # ================ AIOHTTP SERVER ================
 
 web_app = web.Application()
-
 web_app.router.add_get("/", health)
 web_app.router.add_get("/health", health)
 web_app.router.add_post("/webhook", webhook_handler)
@@ -491,7 +464,6 @@ web_app.on_cleanup.append(on_cleanup)
 # ================ RUN SERVER ================
 
 if __name__ == "__main__":
-
     web.run_app(
         web_app,
         host="0.0.0.0",
