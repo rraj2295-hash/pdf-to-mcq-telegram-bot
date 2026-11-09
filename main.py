@@ -64,7 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
         "📚 Send a text-based PDF file.\n\n"
-        "PDF bhejne ke baad bot aapse timer select karne bolega.\n\n"
+        "PDF bhejne ke baad bot timer select karne bolega.\n\n"
         "Best of luck for Bihar CHO preparation! 🩺"
     )
 
@@ -370,7 +370,7 @@ async def timer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             sent += 1
 
-            # Har question ke baad timer + 2 second ka gap taaki quiz smooth chale
+            # Timer ke baad agle question ke liye thoda wait
             await asyncio.sleep(seconds + 2)
 
         except Exception:
@@ -401,7 +401,7 @@ telegram_app.add_handler(CallbackQueryHandler(timer_callback))
 # ================ WEBHOOK HANDLER ================
 
 async def webhook_handler(request):
-    supplied_secret = request.headers.get("X-Telegram-Api-Secret-Token", "")
+    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
 
     if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
         raise web.HTTPForbidden(text="Invalid webhook secret")
