@@ -1,5 +1,7 @@
-
 python-telegram-bot[webhooks]==21.10
 google-genai
 pypdf
 aiohttp
+motor
+
+
