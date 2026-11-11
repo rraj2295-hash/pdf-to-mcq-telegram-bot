@@ -93,7 +93,7 @@ def get_available_models():
 # ================ START & HELP ================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Received /start from user %s", update.effective_user.id)
+    logger.info("Handling /start command from %s", update.effective_user.id)
     await update.effective_message.reply_text(
         "🏥 **Welcome to Bihar CHO Nursing Mock Bot!** 🎓\n\n"
         "📚 Send a text-based PDF (Study material / Syllabus notes).\n"
@@ -683,7 +683,8 @@ async def on_cleanup(app: web.Application):
         if not task.done():
             task.cancel()
 
-    await telegram_app.bot.delete_webhook()
+    # NOTE: delete_webhook ko intentionally hata diya gaya hai
+    # taaki purana container band hone par naye container ka webhook delete na ho sake.
     await telegram_app.stop()
     await telegram_app.shutdown()
     mongo_client.close()
