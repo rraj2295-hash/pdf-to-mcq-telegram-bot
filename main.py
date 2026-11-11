@@ -621,4 +621,109 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action, session_id = data.split(":")
         session = await db.quiz_sessions.find_one({"session_id": session_id})
         if not session or not session.get("is_running"):
-            await query.answer("This quiz session has already completed or does not exist.",
+            await query.answer("This quiz session has already completed or does not exist.", show_alert=True)
+            return
+
+        if action == "ctrl_pause":
+            await db.quiz_sessions.update_one(
+                {"session_id": session_id},
+                {"$set": {"is_paused": True}}
+            )
+            await query.edit_reply_markup(reply_markup=get_control_keyboard(session_id, is_paused=True))
+            await query.answer("⏸️ Quiz paused!")
+
+        elif action == "ctrl_resume":
+            await db.quiz_sessions.update_one(
+                {"session_id": session_id},
+                {"$set": {"is_paused": False}}
+            )
+            await query.edit_reply_markup(reply_markup=get_control_keyboard(session_id, is_paused=False))
+            await query.answer("▶️ Quiz resumed!")
+
+        elif action == "ctrl_restart":
+            await db.quiz_sessions.update_one(
+                {"session_id": session_id},
+                {"$set": {"should_restart": True, "is_paused": False}}
+            )
+            await query.answer("🔄 Restarting quiz from Question 1...", show_alert=True)
+
+
+# ================ WEBHOOK & AIOHTTP HTTP SERVER ================
+
+async def health_check(request: web.Request) -> web.Response:
+    """Render port scan and uptime ping."""
+    return web.Response(text="Bihar CHO Quiz Bot is active and running!", status=200)
+
+
+async def telegram_webhook_handler(request: web.Request) -> web.Response:
+    """Processes incoming Telegram updates via secure webhook."""
+    received_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(received_token, WEBHOOK_SECRET):
+        logger.warning("Unauthorized webhook request dropped (Invalid Secret Token).")
+        return web.Response(status=403, text="Forbidden")
+
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return web.Response(status=200, text="OK")
+    except Exception as exc:
+        logger.exception("Error processing webhook update: %s", exc)
+        return web.Response(status=500, text="Internal Error")
+
+
+# ================ APPLICATION LIFECYCLE ================
+
+async def on_startup(app: web.Application):
+    """Initializes Telegram Bot, handlers, and registers the webhook."""
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_pdf))
+    telegram_app.add_handler(PollAnswerHandler(handle_poll_answer))
+    telegram_app.add_handler(CallbackQueryHandler(callback_router))
+
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    full_webhook_url = f"{RENDER_URL.rstrip('/')}{webhook_path}"
+
+    await telegram_app.bot.set_webhook(
+        url=full_webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
+    logger.info("Webhook successfully registered to: %s", full_webhook_url)
+
+
+async def on_cleanup(app: web.Application):
+    """Graceful shutdown for background tasks, Telegram Bot, and Mongo connection."""
+    logger.info("Shutting down bot application...")
+
+    for session_id, task in list(ACTIVE_TASKS.items()):
+        if not task.done():
+            task.cancel()
+
+    await telegram_app.bot.delete_webhook()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+    mongo_client.close()
+    logger.info("Cleanup completed successfully.")
+
+
+def create_web_app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_post(f"/webhook/{BOT_TOKEN}", telegram_webhook_handler)
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    return app
+
+
+# ================ MAIN RUNNER ================
+
+if __name__ == "__main__":
+    web_app = create_web_app()
+    web.run_app(web_app, host="0.0.0.0", port=PORT)
