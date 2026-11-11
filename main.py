@@ -7,6 +7,7 @@ import hmac
 import re
 import time
 import uuid
+import certifi
 from datetime import datetime
 
 from aiohttp import web
@@ -50,8 +51,17 @@ if not RENDER_URL:
 if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
     raise RuntimeError("Invalid WEBHOOK_SECRET format")
 
-# Database & External Clients
-mongo_client = AsyncIOMotorClient(MONGODB_URI)
+# Database & External Clients (SSL/TLS Fix with certifi)
+if "mongodb+srv://" in MONGODB_URI or "ssl=true" in MONGODB_URI.lower():
+    mongo_client = AsyncIOMotorClient(
+        MONGODB_URI,
+        tlsCAFile=certifi.where(),
+        tls=True,
+        serverSelectionTimeoutMS=5000
+    )
+else:
+    mongo_client = AsyncIOMotorClient(MONGODB_URI)
+
 db = mongo_client[DB_NAME]
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -200,7 +210,6 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not answer.option_ids:
         return
 
-    # Check active poll from MongoDB
     poll_doc = await db.active_polls.find_one({"poll_id": str(poll_id)})
     if not poll_doc:
         return
@@ -214,7 +223,6 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = user.id
     user_name = user.full_name or user.first_name or f"Candidate_{user_id}"
 
-    # Upsert candidate score for this session in MongoDB
     inc_query = {
         "attempted": 1,
         "total_time": elapsed,
@@ -288,7 +296,6 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ Could not extract questions from this document.")
             return
 
-        # Save to MongoDB Question Bank for future reuse
         question_set_id = str(uuid.uuid4())[:8]
         await db.question_bank.insert_one({
             "set_id": question_set_id,
@@ -345,7 +352,6 @@ async def run_quiz_flow(bot, session_id: str):
         seconds = session["seconds"]
         total_q = len(questions)
 
-        # Clear active polls & reset scores for this session
         await db.active_polls.delete_many({"session_id": session_id})
         await db.session_scores.delete_many({"session_id": session_id})
         await db.quiz_sessions.update_one(
@@ -426,7 +432,6 @@ async def run_quiz_flow(bot, session_id: str):
             correct_opt_id = keys.index(answer)
 
             try:
-                # IMPORTANT: is_anonymous=False allows tracking participant identities for leaderboards
                 poll_msg = await bot.send_poll(
                     chat_id=target_destination,
                     question=formatted_question,
@@ -448,7 +453,6 @@ async def run_quiz_flow(bot, session_id: str):
 
                 sent += 1
 
-                # Update live control panel in creator's private chat
                 control_msg_id = sess_state.get("control_message_id")
                 if control_msg_id:
                     try:
@@ -467,7 +471,6 @@ async def run_quiz_flow(bot, session_id: str):
                     except Exception:
                         pass
 
-                # Wait for question window
                 step_sleep = seconds + 2
                 for _ in range(step_sleep):
                     curr = await db.quiz_sessions.find_one({"session_id": session_id})
@@ -487,10 +490,8 @@ async def run_quiz_flow(bot, session_id: str):
         if restarted:
             continue
 
-        # Wait grace period for final poll submissions
         await asyncio.sleep(3)
 
-        # Leaderboard calculation from MongoDB
         cursor = db.session_scores.find({"session_id": session_id}).sort([("correct", -1), ("total_time", 1)]).limit(10)
         sorted_users = await cursor.to_list(length=10)
 
@@ -536,7 +537,6 @@ async def run_quiz_flow(bot, session_id: str):
         except Exception as e:
             logger.warning("Could not post closing leaderboard: %s", e)
 
-        # Update final state in DB and close control panel
         await db.quiz_sessions.update_one(
             {"session_id": session_id},
             {"$set": {"is_running": False, "concluded_at": datetime.utcnow()}}
@@ -571,13 +571,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # 1. Timer Selection & Session Launch
     if data.startswith("timer_"):
         parts = data.split(":")
         seconds = int(parts[0].replace("timer_", ""))
         question_set_id = parts[1]
 
-        # Retrieve questions from database
         stored_set = await db.question_bank.find_one({"set_id": question_set_id})
         if not stored_set:
             await query.edit_message_text("❌ Question set expired or missing. Please upload the PDF again.")
@@ -600,7 +598,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        # Store session record in MongoDB
         await db.quiz_sessions.insert_one({
             "session_id": session_id,
             "set_id": question_set_id,
@@ -616,137 +613,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "created_at": datetime.utcnow()
         })
 
-        # Start async quiz worker
         task = asyncio.create_task(run_quiz_flow(bot=context.bot, session_id=session_id))
         ACTIVE_TASKS[session_id] = task
         return
 
-    # 2. Controls: Pause, Resume, Restart
     if ":" in data and data.split(":")[0] in ("ctrl_pause", "ctrl_resume", "ctrl_restart"):
         action, session_id = data.split(":")
         session = await db.quiz_sessions.find_one({"session_id": session_id})
         if not session or not session.get("is_running"):
-            await query.answer("This quiz session has already completed or does not exist.", show_alert=True)
-            return
-
-        if action == "ctrl_pause":
-            await db.quiz_sessions.update_one({"session_id": session_id}, {"$set": {"is_paused": True}})
-            await query.edit_message_text(
-                f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{session['topic']}`\n"
-                f"⏱️ Status: `PAUSED ⏸️`\n"
-                "Quiz is on pause. No next question will be sent until resumed.",
-                reply_markup=get_control_keyboard(session_id, is_paused=True),
-                parse_mode="Markdown"
-            )
-            await context.bot.send_message(
-                chat_id=session["target_destination"],
-                text="⏸️ **Quiz ko Admin dwara temporary Pause kar diya gaya hai.**"
-            )
-
-        elif action == "ctrl_resume":
-            await db.quiz_sessions.update_one({"session_id": session_id}, {"$set": {"is_paused": False}})
-            await query.edit_message_text(
-                f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{session['topic']}`\n"
-                f"⏱️ Status: `RESUMED ▶️`\n"
-                "Quiz is active again.",
-                reply_markup=get_control_keyboard(session_id, is_paused=False),
-                parse_mode="Markdown"
-            )
-            await context.bot.send_message(
-                chat_id=session["target_destination"],
-                text="▶️ **Quiz Resume ho chuki hai. Agla question aa raha hai!**"
-            )
-
-        elif action == "ctrl_restart":
-            await db.quiz_sessions.update_one(
-                {"session_id": session_id},
-                {"$set": {"is_paused": False, "should_restart": True}}
-            )
-            await query.edit_message_text(
-                f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{session['topic']}`\n"
-                f"⏱️ Status: `RESTARTING 🔄`\n"
-                "Restarting test from Question 1...",
-                reply_markup=get_control_keyboard(session_id, is_paused=False),
-                parse_mode="Markdown"
-            )
-
-
-# ================ REGISTER HANDLERS ================
-
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help", help_command))
-telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
-telegram_app.add_handler(CallbackQueryHandler(callback_router))
-telegram_app.add_handler(PollAnswerHandler(handle_poll_answer))
-
-
-# ================ WEBHOOK & AIOHTTP SERVER ================
-
-async def webhook_handler(request):
-    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
-        raise web.HTTPForbidden(text="Invalid webhook secret")
-
-    try:
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.update_queue.put(update)
-        return web.Response(text="OK")
-    except Exception:
-        logger.exception("Webhook processing failed")
-        return web.Response(status=500, text="Webhook error")
-
-
-async def health(request):
-    return web.json_response({
-        "status": "online",
-        "service": "Bihar CHO Nursing Quiz Engine",
-        "database": "MongoDB Connected"
-    })
-
-
-async def on_startup(app):
-    # Ensure database indexes
-    await db.active_polls.create_index("poll_id", unique=True)
-    await db.session_scores.create_index([("session_id", 1), ("user_id", 1)], unique=True)
-
-    await telegram_app.initialize()
-    await telegram_app.start()
-
-    webhook_url = RENDER_URL.rstrip("/") + "/webhook"
-    await telegram_app.bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=["message", "callback_query", "poll_answer", "poll"],
-        drop_pending_updates=False,
-    )
-    logger.info("Telegram Webhook set successfully to %s", webhook_url)
-
-
-async def on_cleanup(app):
-    for task in ACTIVE_TASKS.values():
-        if not task.done():
-            task.cancel()
-    mongo_client.close()
-    await telegram_app.stop()
-    await telegram_app.shutdown()
-    logger.info("Bot and MongoDB connections shut down safely.")
-
-
-web_app = web.Application()
-web_app.router.add_get("/", health)
-web_app.router.add_get("/health", health)
-web_app.router.add_post("/webhook", webhook_handler)
-
-web_app.on_startup.append(on_startup)
-web_app.on_cleanup.append(on_cleanup)
-
-if __name__ == "__main__":
-    web.run_app(
-        web_app,
-        host="0.0.0.0",
-        port=PORT,
-    )
+            await query.answer("This quiz session has already completed or does not exist.",
