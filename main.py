@@ -3,8 +3,6 @@ import json
 import asyncio
 import logging
 import tempfile
-import hmac
-import re
 import time
 import uuid
 import certifi
@@ -35,8 +33,7 @@ logger = logging.getLogger("BiharCHOBot")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
-MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_URI = os.environ.get("MONGODB_URI", "")
 DB_NAME = os.environ.get("MONGODB_DB_NAME", "bihar_cho_quiz_db")
 
 raw_channel = os.environ.get("TARGET_CHANNEL_ID", "")
@@ -48,19 +45,14 @@ PORT = int(os.environ.get("PORT", "10000"))
 if not RENDER_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL environment variable is missing")
 
-if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
-    raise RuntimeError("Invalid WEBHOOK_SECRET format")
-
-# Database & External Clients (SSL/TLS Fix with certifi)
-if "mongodb+srv://" in MONGODB_URI or "ssl=true" in MONGODB_URI.lower():
-    mongo_client = AsyncIOMotorClient(
-        MONGODB_URI,
-        tlsCAFile=certifi.where(),
-        tls=True,
-        serverSelectionTimeoutMS=5000
-    )
-else:
-    mongo_client = AsyncIOMotorClient(MONGODB_URI)
+# Database Connection (Direct SSL Fix)
+mongo_client = AsyncIOMotorClient(
+    MONGODB_URI,
+    tls=True,
+    tlsCAFile=certifi.where(),
+    tlsAllowInvalidCertificates=True,
+    serverSelectionTimeoutMS=10000
+)
 
 db = mongo_client[DB_NAME]
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -71,7 +63,6 @@ telegram_app = (
     .build()
 )
 
-# Active background session tasks (session_id -> asyncio.Task)
 ACTIVE_TASKS = {}
 
 
@@ -102,15 +93,15 @@ def get_available_models():
 # ================ START & HELP ================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Received /start from user %s", update.effective_user.id)
     await update.effective_message.reply_text(
         "🏥 **Welcome to Bihar CHO Nursing Mock Bot!** 🎓\n\n"
         "📚 Send a text-based PDF (Study material / Syllabus notes).\n"
         "Questions are automatically extracted, stored in Database, and scheduled.\n\n"
         "**Features:**\n"
-        "• MongoDB Persistent Storage (Data safe on bot restarts)\n"
-        "• Accurate Candidate-wise Toppers Leaderboard (Right, Wrong, Speed)\n"
-        "• In-Chat Realtime Controls: Pause ⏸️ / Resume ▶️ / Restart 🔄\n"
-        "• Multi-Session Support across study groups",
+        "• MongoDB Persistent Storage\n"
+        "• Accurate Candidate-wise Toppers Leaderboard\n"
+        "• In-Chat Realtime Controls: Pause ⏸️ / Resume ▶️ / Restart 🔄",
         parse_mode="Markdown"
     )
 
@@ -130,7 +121,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def generate_quiz_payload(pdf_text):
     prompt = f"""
-You are an expert nursing examination question creator for State CHO (Community Health Officer) exams.
+You are an expert nursing examination question creator for State CHO exams.
 
 1. Identify a concise topic title for this material (max 6 words).
 2. Create up to 30 high-yield nursing MCQs based strictly on the provided text.
@@ -651,17 +642,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================ WEBHOOK & AIOHTTP HTTP SERVER ================
 
 async def health_check(request: web.Request) -> web.Response:
-    """Render port scan and uptime ping."""
     return web.Response(text="Bihar CHO Quiz Bot is active and running!", status=200)
 
 
 async def telegram_webhook_handler(request: web.Request) -> web.Response:
-    """Processes incoming Telegram updates via secure webhook."""
-    received_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not hmac.compare_digest(received_token, WEBHOOK_SECRET):
-        logger.warning("Unauthorized webhook request dropped (Invalid Secret Token).")
-        return web.Response(status=403, text="Forbidden")
-
     try:
         data = await request.json()
         update = Update.de_json(data, telegram_app.bot)
@@ -675,7 +659,6 @@ async def telegram_webhook_handler(request: web.Request) -> web.Response:
 # ================ APPLICATION LIFECYCLE ================
 
 async def on_startup(app: web.Application):
-    """Initializes Telegram Bot, handlers, and registers the webhook."""
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_pdf))
@@ -685,12 +668,9 @@ async def on_startup(app: web.Application):
     await telegram_app.initialize()
     await telegram_app.start()
 
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    full_webhook_url = f"{RENDER_URL.rstrip('/')}{webhook_path}"
-
+    full_webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
     await telegram_app.bot.set_webhook(
         url=full_webhook_url,
-        secret_token=WEBHOOK_SECRET,
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True
     )
@@ -698,9 +678,7 @@ async def on_startup(app: web.Application):
 
 
 async def on_cleanup(app: web.Application):
-    """Graceful shutdown for background tasks, Telegram Bot, and Mongo connection."""
     logger.info("Shutting down bot application...")
-
     for session_id, task in list(ACTIVE_TASKS.items()):
         if not task.done():
             task.cancel()
@@ -715,7 +693,7 @@ async def on_cleanup(app: web.Application):
 def create_web_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", health_check)
-    app.router.add_post(f"/webhook/{BOT_TOKEN}", telegram_webhook_handler)
+    app.router.add_post("/webhook", telegram_webhook_handler)
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
