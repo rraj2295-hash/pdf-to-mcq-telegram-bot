@@ -6,6 +6,8 @@ import tempfile
 import hmac
 import re
 import time
+import uuid
+from datetime import datetime
 
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,20 +22,21 @@ from telegram.ext import (
 )
 from google import genai
 from pypdf import PdfReader
+from motor.motor_asyncio import AsyncIOMotorClient
 
-
-# ================ CONFIGURATION ================
+# ================ CONFIGURATION & LOGGING ================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BiharCHOBot")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+DB_NAME = os.environ.get("MONGODB_DB_NAME", "bihar_cho_quiz_db")
 
 raw_channel = os.environ.get("TARGET_CHANNEL_ID", "")
 TARGET_CHANNEL_ID = raw_channel.strip() if raw_channel else None
@@ -42,11 +45,14 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", "10000"))
 
 if not RENDER_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL is missing")
+    raise RuntimeError("RENDER_EXTERNAL_URL environment variable is missing")
 
 if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
     raise RuntimeError("Invalid WEBHOOK_SECRET format")
 
+# Database & External Clients
+mongo_client = AsyncIOMotorClient(MONGODB_URI)
+db = mongo_client[DB_NAME]
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 telegram_app = (
@@ -55,25 +61,11 @@ telegram_app = (
     .build()
 )
 
-# Global trackers for live session
-ACTIVE_POLLS = {}
-USER_SCORES = {}
-
-# Session flow control
-QUIZ_STATE = {
-    "is_running": False,
-    "is_paused": False,
-    "should_restart": False,
-    "current_questions": [],
-    "topic": "",
-    "timer_seconds": 30,
-    "target_destination": None,
-    "reply_chat_id": None,
-    "control_message_id": None,
-}
+# Active background session tasks (session_id -> asyncio.Task)
+ACTIVE_TASKS = {}
 
 
-# ================ AUTO-DISCOVERY MODEL RESOLVER ================
+# ================ MODEL RESOLVER ================
 
 def get_available_models():
     discovered = []
@@ -87,9 +79,9 @@ def get_available_models():
 
     flash_models = [m for m in discovered if "flash" in m.lower() and "8b" not in m.lower()]
     other_gemini = [m for m in discovered if "gemini" in m.lower() and m not in flash_models]
-    
+
     final_candidates = flash_models + other_gemini + discovered
-    fallbacks = ["gemini-3.0-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    fallbacks = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     for fb in fallbacks:
         if fb not in final_candidates:
             final_candidates.append(fb)
@@ -101,47 +93,50 @@ def get_available_models():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "Welcome to Bihar CHO PDF Quiz Bot! 🎓\n\n"
-        "📚 Send a text-based PDF file.\n"
-        "PDF bhejne ke baad timer select karein.\n\n"
-        "Features:\n"
-        "• Automatic Question Numbering\n"
-        "• Live Control (Pause / Resume / Restart)\n"
-        "• Candidate-wise Detailed Leaderboard (Sahi, Galat, Time) 🩺"
+        "🏥 **Welcome to Bihar CHO Nursing Mock Bot!** 🎓\n\n"
+        "📚 Send a text-based PDF (Study material / Syllabus notes).\n"
+        "Questions are automatically extracted, stored in Database, and scheduled.\n\n"
+        "**Features:**\n"
+        "• MongoDB Persistent Storage (Data safe on bot restarts)\n"
+        "• Accurate Candidate-wise Toppers Leaderboard (Right, Wrong, Speed)\n"
+        "• In-Chat Realtime Controls: Pause ⏸️ / Resume ▶️ / Restart 🔄\n"
+        "• Multi-Session Support across study groups",
+        parse_mode="Markdown"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "📖 Bihar CHO Quiz Bot Help\n\n"
-        "/start - Start the Bot\n"
-        "/help - Instructions\n\n"
-        "PDF upload karein, quiz start hone par Pause, Resume aur Restart buttons control ke liye milenge."
+        "📖 **Bihar CHO Quiz Bot Guide**\n\n"
+        "1. Send your nursing notes in PDF format.\n"
+        "2. Select the poll answer countdown timer (15s - 60s).\n"
+        "3. Live quiz will launch in the designated group/channel.\n"
+        "4. Use the control panel in private DM to Pause or Restart at any point.",
+        parse_mode="Markdown"
     )
 
 
-# ================ GEMINI MCQ & TOPIC GENERATION ================
+# ================ GEMINI MCQ EXTRACTION ================
 
 def generate_quiz_payload(pdf_text):
     prompt = f"""
-You are an expert nursing examination question creator.
+You are an expert nursing examination question creator for State CHO (Community Health Officer) exams.
 
-1. Identify a suitable short topic title for this nursing study material (max 6 words).
-2. Create up to 30 MCQs from the supplied PDF text.
+1. Identify a concise topic title for this material (max 6 words).
+2. Create up to 30 high-yield nursing MCQs based strictly on the provided text.
 
 Rules:
-- Use only facts from the PDF.
 - Each question must have exactly four options (A, B, C, D).
-- Specify the correct answer clearly.
-- Add concise rationale if available.
+- Specify the correct answer option clearly.
+- Provide a brief rationale (maximum 200 characters) for why the answer is correct.
 
-Return valid JSON in this exact structure:
+Return strictly valid JSON matching this schema:
 {{
   "topic": "Topic Title Here",
   "questions": [
     {{
       "number": 1,
-      "question": "Question text without numbering prefix",
+      "question": "Question text here",
       "options": {{
         "A": "Option A",
         "B": "Option B",
@@ -149,12 +144,12 @@ Return valid JSON in this exact structure:
         "D": "Option D"
       }},
       "answer": "B",
-      "rationale": ""
+      "rationale": "Rationale explanation here"
     }}
   ]
 }}
 
-PDF TEXT:
+PDF CONTENT:
 {pdf_text[:60000]}
 """
 
@@ -173,11 +168,11 @@ PDF TEXT:
             )
 
             if not response.text:
-                raise ValueError("Empty response from model")
+                raise ValueError("Empty response from AI")
 
             data = json.loads(response.text)
             if not isinstance(data, dict):
-                raise ValueError("Invalid JSON")
+                raise ValueError("Response is not a JSON object")
 
             questions = data.get("questions", [])
             topic = data.get("topic", "Bihar CHO Nursing Mock Test")
@@ -187,64 +182,65 @@ PDF TEXT:
 
         except Exception as exc:
             last_error = exc
-            err_msg = str(exc).upper()
-            if "404" in err_msg or "NOT_FOUND" in err_msg:
+            if "404" in str(exc) or "NOT_FOUND" in str(exc):
                 continue
-
             time.sleep(2)
             continue
 
-    raise last_error if last_error else RuntimeError("Gemini generation failed")
+    raise last_error if last_error else RuntimeError("Gemini AI extraction failed")
 
 
-# ================ POLL ANSWER TRACKER (LEADERBOARD) ================
+# ================ POLL ANSWER TRACKER (MONGODB) ================
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = update.poll_answer
     poll_id = answer.poll_id
     user = answer.user
 
-    if poll_id not in ACTIVE_POLLS:
-        return
-
-    poll_info = ACTIVE_POLLS[poll_id]
-    correct_id = poll_info["correct_option_id"]
-    start_time = poll_info["timestamp"]
-    elapsed = max(0.5, round(time.time() - start_time, 1))
-
-    user_id = user.id
-    user_name = user.full_name or user.first_name or f"Student_{user_id}"
-
-    if user_id not in USER_SCORES:
-        USER_SCORES[user_id] = {
-            "name": user_name,
-            "correct": 0,
-            "wrong": 0,
-            "attempted": 0,
-            "total_time": 0.0,
-        }
-
     if not answer.option_ids:
         return
 
-    USER_SCORES[user_id]["attempted"] += 1
-    USER_SCORES[user_id]["total_time"] += elapsed
+    # Check active poll from MongoDB
+    poll_doc = await db.active_polls.find_one({"poll_id": str(poll_id)})
+    if not poll_doc:
+        return
 
-    if answer.option_ids[0] == correct_id:
-        USER_SCORES[user_id]["correct"] += 1
-    else:
-        USER_SCORES[user_id]["wrong"] += 1
+    session_id = poll_doc["session_id"]
+    correct_option_id = poll_doc["correct_option_id"]
+    start_time = poll_doc["created_at"]
+    elapsed = max(0.5, round(time.time() - start_time, 1))
+
+    is_correct = (answer.option_ids[0] == correct_option_id)
+    user_id = user.id
+    user_name = user.full_name or user.first_name or f"Candidate_{user_id}"
+
+    # Upsert candidate score for this session in MongoDB
+    inc_query = {
+        "attempted": 1,
+        "total_time": elapsed,
+        "correct": 1 if is_correct else 0,
+        "wrong": 0 if is_correct else 1
+    }
+
+    await db.session_scores.update_one(
+        {"session_id": session_id, "user_id": user_id},
+        {
+            "$set": {"user_name": user_name, "updated_at": datetime.utcnow()},
+            "$inc": inc_query
+        },
+        upsert=True
+    )
 
 
 # ================ CONTROL KEYBOARD HELPER ================
 
-def get_control_keyboard(is_paused=False):
+def get_control_keyboard(session_id: str, is_paused: bool = False):
     toggle_btn = (
-        InlineKeyboardButton("▶️ Resume Quiz", callback_data="ctrl_resume")
+        InlineKeyboardButton("▶️ Resume Quiz", callback_data=f"ctrl_resume:{session_id}")
         if is_paused
-        else InlineKeyboardButton("⏸️ Pause Quiz", callback_data="ctrl_pause")
+        else InlineKeyboardButton("⏸️ Pause Quiz", callback_data=f"ctrl_pause:{session_id}")
     )
-    restart_btn = InlineKeyboardButton("🔄 Restart Quiz", callback_data="ctrl_restart")
+    restart_btn = InlineKeyboardButton("🔄 Restart Quiz", callback_data=f"ctrl_restart:{session_id}")
     return InlineKeyboardMarkup([[toggle_btn, restart_btn]])
 
 
@@ -255,17 +251,18 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = message.document
 
     if not document or not document.file_name or not document.file_name.lower().endswith(".pdf"):
-        await message.reply_text("Please send a valid PDF file.")
+        await message.reply_text("Please upload a valid text PDF document.")
         return
 
     if document.file_size and document.file_size > 20 * 1024 * 1024:
-        await message.reply_text("PDF must be smaller than 20 MB.")
+        await message.reply_text("File size exceeds 20 MB limit.")
         return
 
     status_msg = await message.reply_text(
-        "📥 PDF received!\n"
-        "⏳ Reading PDF, determining Topic and creating MCQs with Gemini AI...\n"
-        "Please wait..."
+        "📥 **PDF Received!**\n"
+        "⏳ Reading document, structuring nursing MCQs, and caching to database...\n"
+        "Please wait a moment...",
+        parse_mode="Markdown"
     )
 
     temp_path = None
@@ -278,40 +275,50 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reader = PdfReader(temp_path)
         if reader.is_encrypted:
-            raise ValueError("Encrypted PDF is not supported")
+            raise ValueError("Password-protected PDF is not supported.")
 
         pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
         if len(pdf_text.strip()) < 100:
-            await status_msg.edit_text("❌ Text could not be read. Please send a text-based PDF.")
+            await status_msg.edit_text("❌ No readable text found. Please upload a digital/text-based PDF.")
             return
 
         topic, questions = await asyncio.to_thread(generate_quiz_payload, pdf_text)
 
         if not questions:
-            await status_msg.edit_text("No MCQs could be generated.")
+            await status_msg.edit_text("❌ Could not extract questions from this document.")
             return
 
-        context.user_data["pending_questions"] = questions
+        # Save to MongoDB Question Bank for future reuse
+        question_set_id = str(uuid.uuid4())[:8]
+        await db.question_bank.insert_one({
+            "set_id": question_set_id,
+            "topic": topic,
+            "questions": questions,
+            "created_by": message.from_user.id,
+            "created_at": datetime.utcnow()
+        })
+
+        context.user_data["pending_set_id"] = question_set_id
         context.user_data["pending_topic"] = topic
         context.user_data["reply_chat_id"] = message.chat_id
 
         keyboard = [
             [
-                InlineKeyboardButton("⏱️ 15s", callback_data="timer_15"),
-                InlineKeyboardButton("⏱️ 30s", callback_data="timer_30"),
+                InlineKeyboardButton("⏱️ 15s", callback_data=f"timer_15:{question_set_id}"),
+                InlineKeyboardButton("⏱️ 30s", callback_data=f"timer_30:{question_set_id}"),
             ],
             [
-                InlineKeyboardButton("⏱️ 45s", callback_data="timer_45"),
-                InlineKeyboardButton("⏱️ 60s", callback_data="timer_60"),
+                InlineKeyboardButton("⏱️ 45s", callback_data=f"timer_45:{question_set_id}"),
+                InlineKeyboardButton("⏱️ 60s", callback_data=f"timer_60:{question_set_id}"),
             ]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await status_msg.edit_text(
-            f"📖 **Topic**: {topic}\n"
-            f"📊 **Total Questions**: {len(questions)}\n\n"
-            "⏱️ Har question ke liye **Timer kitne seconds** ka rakhna hai? Select karein:",
-            reply_markup=reply_markup,
+            f"📖 **Topic**: `{topic}`\n"
+            f"📊 **Total MCQs**: `{len(questions)}`\n"
+            f"💾 **Saved to Bank ID**: `{question_set_id}`\n\n"
+            "⏱️ Har question ke liye timer kitne seconds ka rakhna hai?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
@@ -325,28 +332,35 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================ QUIZ RUNNER ENGINE ================
 
-async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions, seconds):
-    global ACTIVE_POLLS, USER_SCORES, QUIZ_STATE
-
+async def run_quiz_flow(bot, session_id: str):
     while True:
-        # Reset session values
-        QUIZ_STATE["is_running"] = True
-        QUIZ_STATE["is_paused"] = False
-        QUIZ_STATE["should_restart"] = False
-        ACTIVE_POLLS = {}
-        USER_SCORES = {}
+        session = await db.quiz_sessions.find_one({"session_id": session_id})
+        if not session:
+            break
 
+        target_destination = session["target_destination"]
+        reply_chat_id = session["reply_chat_id"]
+        topic = session["topic"]
+        questions = session["questions"]
+        seconds = session["seconds"]
         total_q = len(questions)
 
-        # 1. Topic Announcement
+        # Clear active polls & reset scores for this session
+        await db.active_polls.delete_many({"session_id": session_id})
+        await db.session_scores.delete_many({"session_id": session_id})
+        await db.quiz_sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {"is_running": True, "is_paused": False, "should_restart": False}}
+        )
+
         intro_banner = (
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "🎯 **BIHAR CHO DAILY QUIZ TEST** 🩺\n"
+            "🎯 **BIHAR CHO NURSING MOCK TEST** 🩺\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📖 **Topic:** {topic}\n"
             f"❓ **Total Questions:** {total_q}\n"
             f"⏱️ **Time per Question:** {seconds} Seconds\n\n"
-            "👉 *Answers select karein. End me Detailed Toppers Leaderboard aayega!*"
+            "👉 *Poll me sahi option chunein. Quiz ke baad Toppers Leaderboard declare hoga!*"
         )
 
         try:
@@ -362,46 +376,40 @@ async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions
 
         sent = 0
         keys = ["A", "B", "C", "D"]
-        is_public_channel = str(target_destination).startswith("@")
-        is_anonymous_mode = True if is_public_channel else False
-
         restarted = False
 
         for idx, q in enumerate(questions, start=1):
-            # Check Restart command
-            if QUIZ_STATE["should_restart"]:
+            sess_state = await db.quiz_sessions.find_one({"session_id": session_id})
+            if not sess_state or not sess_state.get("is_running", True):
+                break
+
+            if sess_state.get("should_restart", False):
                 restarted = True
                 await bot.send_message(
                     chat_id=target_destination,
-                    text="🔄 **Quiz Restart ho rahi hai... Question 1 se dobara shuru kiya ja raha hai.**",
+                    text="🔄 **Quiz dobara shuru ho rahi hai... Question 1 par return kiya ja raha hai.**",
                     parse_mode="Markdown"
                 )
                 await asyncio.sleep(2)
                 break
 
-            # Check Pause command
-            while QUIZ_STATE["is_paused"]:
-                if QUIZ_STATE["should_restart"]:
-                    break
+            while sess_state.get("is_paused", False):
                 await asyncio.sleep(1)
+                sess_state = await db.quiz_sessions.find_one({"session_id": session_id})
+                if sess_state.get("should_restart", False):
+                    break
 
-            if QUIZ_STATE["should_restart"]:
+            if sess_state.get("should_restart", False):
                 restarted = True
                 await bot.send_message(
                     chat_id=target_destination,
-                    text="🔄 **Quiz Restart ho rahi hai... Question 1 se dobara shuru kiya ja raha hai.**",
+                    text="🔄 **Quiz dobara shuru ho rahi hai... Question 1 par return kiya ja raha hai.**",
                     parse_mode="Markdown"
                 )
                 await asyncio.sleep(2)
                 break
-
-            if not isinstance(q, dict):
-                continue
 
             options = q.get("options", {})
-            if not isinstance(options, dict):
-                continue
-
             clean_q = str(q.get("question", "")).strip()
             answer = str(q.get("answer", "")).strip().upper()
 
@@ -418,6 +426,7 @@ async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions
             correct_opt_id = keys.index(answer)
 
             try:
+                # IMPORTANT: is_anonymous=False allows tracking participant identities for leaderboards
                 poll_msg = await bot.send_poll(
                     chat_id=target_destination,
                     question=formatted_question,
@@ -425,73 +434,76 @@ async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions
                     type="quiz",
                     correct_option_id=correct_opt_id,
                     explanation=explanation or None,
-                    is_anonymous=is_anonymous_mode,
+                    is_anonymous=False,
                     open_period=seconds,
                 )
 
                 if poll_msg.poll:
-                    ACTIVE_POLLS[poll_msg.poll.id] = {
+                    await db.active_polls.insert_one({
+                        "poll_id": str(poll_msg.poll.id),
+                        "session_id": session_id,
                         "correct_option_id": correct_opt_id,
-                        "timestamp": time.time(),
-                    }
+                        "created_at": time.time()
+                    })
 
                 sent += 1
 
-                # Update live control message in creator DM
-                if QUIZ_STATE["control_message_id"]:
+                # Update live control panel in creator's private chat
+                control_msg_id = sess_state.get("control_message_id")
+                if control_msg_id:
                     try:
                         await bot.edit_message_text(
                             chat_id=reply_chat_id,
-                            message_id=QUIZ_STATE["control_message_id"],
+                            message_id=control_msg_id,
                             text=(
                                 f"🎮 **Live Quiz Control Panel**\n\n"
                                 f"📖 Topic: `{topic}`\n"
                                 f"📊 Progress: `Question {idx}/{total_q}`\n"
-                                f"⏱️ Status: `{'PAUSED' if QUIZ_STATE['is_paused'] else 'RUNNING'}`"
+                                f"⏱️ Status: `{'PAUSED ⏸️' if sess_state.get('is_paused') else 'RUNNING ▶️'}`"
                             ),
-                            reply_markup=get_control_keyboard(QUIZ_STATE["is_paused"]),
+                            reply_markup=get_control_keyboard(session_id, sess_state.get("is_paused", False)),
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
 
-                # Delay per question
+                # Wait for question window
                 step_sleep = seconds + 2
                 for _ in range(step_sleep):
-                    if QUIZ_STATE["should_restart"]:
+                    curr = await db.quiz_sessions.find_one({"session_id": session_id})
+                    if curr.get("should_restart", False):
                         break
-                    while QUIZ_STATE["is_paused"]:
-                        if QUIZ_STATE["should_restart"]:
-                            break
+                    while curr.get("is_paused", False):
                         await asyncio.sleep(1)
+                        curr = await db.quiz_sessions.find_one({"session_id": session_id})
+                        if curr.get("should_restart", False):
+                            break
                     await asyncio.sleep(1)
 
             except Exception as poll_err:
-                logger.exception("Poll failed: %s", poll_err)
+                logger.exception("Poll dispatch failed: %s", poll_err)
                 break
 
         if restarted:
             continue
 
-        # End of questions: Give grace time for last poll votes
+        # Wait grace period for final poll submissions
         await asyncio.sleep(3)
 
-        # 2. Detailed Leaderboard Generation
-        if USER_SCORES:
-            sorted_users = sorted(
-                USER_SCORES.values(),
-                key=lambda u: (-u["correct"], u["total_time"])
-            )
+        # Leaderboard calculation from MongoDB
+        cursor = db.session_scores.find({"session_id": session_id}).sort([("correct", -1), ("total_time", 1)]).limit(10)
+        sorted_users = await cursor.to_list(length=10)
 
+        if sorted_users:
             ranks_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
             rows = []
-            for i, u in enumerate(sorted_users[:10]):
+            for i, u in enumerate(sorted_users):
                 badge = ranks_emojis[i] if i < len(ranks_emojis) else f"#{i+1}"
                 rows.append(
-                    f"{badge} **{u['name']}**\n"
+                    f"{badge} **{u['user_name']}**\n"
                     f"   ├ ✅ Sahi: `{u['correct']}` | ❌ Galat: `{u['wrong']}`\n"
                     f"   ├ 📝 Total Attempt: `{u['attempted']}/{total_q}`\n"
-                    f"   └ ⏱️ Total Time: `{u['total_time']:.1f}s`"
+                    f"   └ ⏱️ Avg Speed / Total: `{u['total_time']:.1f}s`"
                 )
 
             leaderboard_section = (
@@ -499,19 +511,19 @@ async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 + "\n\n".join(rows) +
                 "\n━━━━━━━━━━━━━━━━━━━━\n"
-                "👏 Bahut khoob! Congratulations Toppers!"
+                "👏 Bahut badhiya! Congratulations Candidates!"
             )
         else:
             leaderboard_section = (
                 "\n\n🏆 **TOPPERS LEADERBOARD** 🏆\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Kisi bhi student ne time limit ke andar attempt nahi kiya."
+                "Is test me kisi bhi student ne answer submit nahi kiya."
             )
 
         closing_message = (
-            "🏁 **QUIZ CONCLUDED!**\n\n"
+            "🏁 **MOCK TEST CONCLUDED!**\n\n"
             f"📖 **Topic:** {topic}\n"
-            f"📊 **Total Questions Completed:** {sent}/{total_q}"
+            f"📊 **Questions Completed:** {sent}/{total_q}"
             + leaderboard_section
         )
 
@@ -522,132 +534,144 @@ async def run_quiz_flow(bot, target_destination, reply_chat_id, topic, questions
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logger.warning("Could not send closing leaderboard: %s", e)
+            logger.warning("Could not post closing leaderboard: %s", e)
 
-        # Cleanup control panel in private chat
-        if QUIZ_STATE["control_message_id"]:
+        # Update final state in DB and close control panel
+        await db.quiz_sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {"is_running": False, "concluded_at": datetime.utcnow()}}
+        )
+
+        final_sess = await db.quiz_sessions.find_one({"session_id": session_id})
+        if final_sess and final_sess.get("control_message_id"):
             try:
                 await bot.edit_message_text(
                     chat_id=reply_chat_id,
-                    message_id=QUIZ_STATE["control_message_id"],
+                    message_id=final_sess["control_message_id"],
                     text=(
                         "🎉 **Quiz Process Completed!**\n\n"
                         f"Topic: {topic}\n"
-                        f"Questions Sent: {sent}/{total_q}\n"
-                        f"Target Group: {target_destination}\n"
-                        f"Active Participants: {len(USER_SCORES)}"
-                    )
+                        f"Questions Delivered: {sent}/{total_q}\n"
+                        f"Target Chat: `{target_destination}`\n"
+                        f"Leaderboard is successfully published."
+                    ),
+                    parse_mode="Markdown"
                 )
             except Exception:
                 pass
 
-        QUIZ_STATE["is_running"] = False
         break
 
 
 # ================ CALLBACK HANDLER (TIMER & CONTROLS) ================
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global QUIZ_STATE
     query = update.callback_query
     await query.answer()
 
     data = query.data
 
-    # 1. Timer Selection
+    # 1. Timer Selection & Session Launch
     if data.startswith("timer_"):
-        seconds = int(data.split("_")[1])
-        questions = context.user_data.get("pending_questions", [])
-        topic = context.user_data.get("pending_topic", "Bihar CHO Nursing Mock Test")
-        reply_chat_id = context.user_data.get("reply_chat_id", query.message.chat_id)
+        parts = data.split(":")
+        seconds = int(parts[0].replace("timer_", ""))
+        question_set_id = parts[1]
 
-        if not questions:
-            await query.edit_message_text("❌ Questions expire ho gaye hain. Kripya PDF dobara bhejein.")
+        # Retrieve questions from database
+        stored_set = await db.question_bank.find_one({"set_id": question_set_id})
+        if not stored_set:
+            await query.edit_message_text("❌ Question set expired or missing. Please upload the PDF again.")
             return
 
+        questions = stored_set["questions"]
+        topic = stored_set["topic"]
+        reply_chat_id = query.message.chat_id
         target_destination = TARGET_CHANNEL_ID if TARGET_CHANNEL_ID else reply_chat_id
 
-        QUIZ_STATE["current_questions"] = questions
-        QUIZ_STATE["topic"] = topic
-        QUIZ_STATE["timer_seconds"] = seconds
-        QUIZ_STATE["target_destination"] = target_destination
-        QUIZ_STATE["reply_chat_id"] = reply_chat_id
+        session_id = str(uuid.uuid4())[:12]
 
         ctrl_msg = await query.edit_message_text(
             f"🎮 **Live Quiz Control Panel**\n\n"
             f"📖 Topic: `{topic}`\n"
-            f"📊 Progress: `Starting...`\n"
-            f"⏱️ Status: `RUNNING` ({seconds}s per Q)",
-            reply_markup=get_control_keyboard(is_paused=False),
+            f"📊 Session ID: `{session_id}`\n"
+            f"⏱️ Status: `RUNNING` ({seconds}s/question)\n"
+            f"Target: `{target_destination}`",
+            reply_markup=get_control_keyboard(session_id, is_paused=False),
             parse_mode="Markdown"
         )
-        QUIZ_STATE["control_message_id"] = ctrl_msg.message_id
 
-        # Launch background quiz flow
-        asyncio.create_task(
-            run_quiz_flow(
-                bot=context.bot,
-                target_destination=target_destination,
-                reply_chat_id=reply_chat_id,
-                topic=topic,
-                questions=questions,
-                seconds=seconds
-            )
-        )
+        # Store session record in MongoDB
+        await db.quiz_sessions.insert_one({
+            "session_id": session_id,
+            "set_id": question_set_id,
+            "topic": topic,
+            "questions": questions,
+            "seconds": seconds,
+            "target_destination": target_destination,
+            "reply_chat_id": reply_chat_id,
+            "control_message_id": ctrl_msg.message_id,
+            "is_running": True,
+            "is_paused": False,
+            "should_restart": False,
+            "created_at": datetime.utcnow()
+        })
+
+        # Start async quiz worker
+        task = asyncio.create_task(run_quiz_flow(bot=context.bot, session_id=session_id))
+        ACTIVE_TASKS[session_id] = task
         return
 
-    # 2. Pause Quiz
-    if data == "ctrl_pause":
-        if QUIZ_STATE["is_running"]:
-            QUIZ_STATE["is_paused"] = True
+    # 2. Controls: Pause, Resume, Restart
+    if ":" in data and data.split(":")[0] in ("ctrl_pause", "ctrl_resume", "ctrl_restart"):
+        action, session_id = data.split(":")
+        session = await db.quiz_sessions.find_one({"session_id": session_id})
+        if not session or not session.get("is_running"):
+            await query.answer("This quiz session has already completed or does not exist.", show_alert=True)
+            return
+
+        if action == "ctrl_pause":
+            await db.quiz_sessions.update_one({"session_id": session_id}, {"$set": {"is_paused": True}})
             await query.edit_message_text(
                 f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"📖 Topic: `{session['topic']}`\n"
                 f"⏱️ Status: `PAUSED ⏸️`\n"
-                "Quiz pause ho chuki hai. Agla question nahi aayega.",
-                reply_markup=get_control_keyboard(is_paused=True),
+                "Quiz is on pause. No next question will be sent until resumed.",
+                reply_markup=get_control_keyboard(session_id, is_paused=True),
                 parse_mode="Markdown"
             )
-            # Group announcement
             await context.bot.send_message(
-                chat_id=QUIZ_STATE["target_destination"],
+                chat_id=session["target_destination"],
                 text="⏸️ **Quiz ko Admin dwara temporary Pause kar diya gaya hai.**"
             )
-        return
 
-    # 3. Resume Quiz
-    if data == "ctrl_resume":
-        if QUIZ_STATE["is_running"]:
-            QUIZ_STATE["is_paused"] = False
+        elif action == "ctrl_resume":
+            await db.quiz_sessions.update_one({"session_id": session_id}, {"$set": {"is_paused": False}})
             await query.edit_message_text(
                 f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"📖 Topic: `{session['topic']}`\n"
                 f"⏱️ Status: `RESUMED ▶️`\n"
-                "Quiz dubara shuru kar di gayi hai.",
-                reply_markup=get_control_keyboard(is_paused=False),
+                "Quiz is active again.",
+                reply_markup=get_control_keyboard(session_id, is_paused=False),
                 parse_mode="Markdown"
             )
-            # Group announcement
             await context.bot.send_message(
-                chat_id=QUIZ_STATE["target_destination"],
-                text="▶️ **Quiz Resume ho chuki hai. Aage ke questions continue ho rahe hain!**"
+                chat_id=session["target_destination"],
+                text="▶️ **Quiz Resume ho chuki hai. Agla question aa raha hai!**"
             )
-        return
 
-    # 4. Restart Quiz
-    if data == "ctrl_restart":
-        if QUIZ_STATE["is_running"]:
-            QUIZ_STATE["is_paused"] = False
-            QUIZ_STATE["should_restart"] = True
+        elif action == "ctrl_restart":
+            await db.quiz_sessions.update_one(
+                {"session_id": session_id},
+                {"$set": {"is_paused": False, "should_restart": True}}
+            )
             await query.edit_message_text(
                 f"🎮 **Live Quiz Control Panel**\n\n"
-                f"📖 Topic: `{QUIZ_STATE['topic']}`\n"
+                f"📖 Topic: `{session['topic']}`\n"
                 f"⏱️ Status: `RESTARTING 🔄`\n"
-                "Quiz ko Question 1 se dobara start kiya ja raha hai...",
-                reply_markup=get_control_keyboard(is_paused=False),
+                "Restarting test from Question 1...",
+                reply_markup=get_control_keyboard(session_id, is_paused=False),
                 parse_mode="Markdown"
             )
-        return
 
 
 # ================ REGISTER HANDLERS ================
@@ -659,11 +683,10 @@ telegram_app.add_handler(CallbackQueryHandler(callback_router))
 telegram_app.add_handler(PollAnswerHandler(handle_poll_answer))
 
 
-# ================ WEBHOOK HANDLER ================
+# ================ WEBHOOK & AIOHTTP SERVER ================
 
 async def webhook_handler(request):
     supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-
     if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
         raise web.HTTPForbidden(text="Invalid webhook secret")
 
@@ -672,47 +695,46 @@ async def webhook_handler(request):
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.update_queue.put(update)
         return web.Response(text="OK")
-
     except Exception:
-        logger.exception("Webhook update failed")
-        return web.Response(status=500, text="Webhook processing error")
+        logger.exception("Webhook processing failed")
+        return web.Response(status=500, text="Webhook error")
 
-
-# ================ HEALTH CHECK ================
 
 async def health(request):
     return web.json_response({
-        "status": "running",
-        "service": "Bihar CHO Quiz Bot"
+        "status": "online",
+        "service": "Bihar CHO Nursing Quiz Engine",
+        "database": "MongoDB Connected"
     })
 
 
-# ================ STARTUP ================
-
 async def on_startup(app):
+    # Ensure database indexes
+    await db.active_polls.create_index("poll_id", unique=True)
+    await db.session_scores.create_index([("session_id", 1), ("user_id", 1)], unique=True)
+
     await telegram_app.initialize()
     await telegram_app.start()
 
     webhook_url = RENDER_URL.rstrip("/") + "/webhook"
-
     await telegram_app.bot.set_webhook(
         url=webhook_url,
         secret_token=WEBHOOK_SECRET,
         allowed_updates=["message", "callback_query", "poll_answer", "poll"],
         drop_pending_updates=False,
     )
-    logger.info("Telegram webhook configured successfully")
+    logger.info("Telegram Webhook set successfully to %s", webhook_url)
 
-
-# ================ CLEANUP ================
 
 async def on_cleanup(app):
+    for task in ACTIVE_TASKS.values():
+        if not task.done():
+            task.cancel()
+    mongo_client.close()
     await telegram_app.stop()
     await telegram_app.shutdown()
-    logger.info("Telegram Bot stopped safely")
+    logger.info("Bot and MongoDB connections shut down safely.")
 
-
-# ================ AIOHTTP SERVER ================
 
 web_app = web.Application()
 web_app.router.add_get("/", health)
@@ -721,9 +743,6 @@ web_app.router.add_post("/webhook", webhook_handler)
 
 web_app.on_startup.append(on_startup)
 web_app.on_cleanup.append(on_cleanup)
-
-
-# ================ RUN SERVER ================
 
 if __name__ == "__main__":
     web.run_app(
